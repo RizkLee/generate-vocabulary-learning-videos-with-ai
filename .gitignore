@@ -1,0 +1,40 @@
+# Node dependencies
+node_modules/
+
+# Build outputs
+dist/
+coverage/
+*.tsbuildinfo
+
+# Runtime outputs
+output/
+public/audio/*.wav
+public/images/*.jpg
+public/videos/*_example_*.mp4
+
+# Project data (contains local/generated/sensitive data)
+data/config.json
+data/cost-log.json
+data/wordlists/*.json
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Temp files
+*.tmp
+*.temp

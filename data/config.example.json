@@ -1,0 +1,38 @@
+{
+  "apiKeys": {
+    "pixabay": "YOUR_PIXABAY_API_KEY"
+  },
+  "gcp": {
+    "project": "YOUR_GCP_PROJECT_ID",
+    "location": "global"
+  },
+  "models": {
+    "tts": "gemini-2.5-flash-preview-tts",
+    "ttsVoice": "Achird",
+    "contentGeneration": "gemini-2.5-flash",
+    "subtitle": "gemini-2.5-flash",
+    "video": "veo-3.1-fast-generate-001"
+  },
+  "prompts": {
+    "englishVoice": "YOUR_ENGLISH_VOICE_PROMPT",
+    "chineseVoice": "YOUR_CHINESE_VOICE_PROMPT",
+    "contentGeneration": "YOUR_CONTENT_GENERATION_PROMPT",
+    "veoVideo": "YOUR_VEO_PROMPT_WITH_{{word}}_AND_{{sentence}}",
+    "chineseIntro": "每天1个西海岸单词",
+    "chineseWordTemplate": "今天要学习的单词是：{{chineseMeaning}}",
+    "englishWordTemplate": "{{word}}, it means {{englishMeaning}}."
+  },
+  "video": {
+    "fps": 30,
+    "width": 1080,
+    "height": 1920,
+    "bgmVolume": 0.35,
+    "bgmVolumeScene3": 0.12
+  },
+  "proxy": {
+    "port": 10808,
+    "host": "127.0.0.1",
+    "enabled": true
+  },
+  "budget": 50
+}
