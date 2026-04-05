@@ -1,9 +1,9 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronDown, ChevronUp, Loader2, RefreshCw,
   Volume2, ImageIcon, Film, Captions, Music, MonitorPlay, Edit3, Save, X,
 } from "lucide-react";
-import type { WordList, WordEntry } from "../../types/index";
+import type { WordList, WordEntry, WordAssets } from "../../types/index";
 
 interface Props {
   wordList: WordList;
@@ -18,6 +18,40 @@ interface WordDraft {
   patterns: string[];
   patternTranslations: string[];
   examples: Array<{ english: string; chinese: string }>;
+}
+
+const DEFAULT_TTS_SPEED = 1.25;
+const MIN_TTS_SPEED = 0.8;
+const MAX_TTS_SPEED = 1.6;
+const SPEED_OPTIONS = Array.from({ length: 17 }, (_, i) => Number((0.8 + i * 0.05).toFixed(2)));
+
+function normalizeTtsSpeed(speed?: number): number {
+  if (!Number.isFinite(speed)) return DEFAULT_TTS_SPEED;
+  return Math.min(MAX_TTS_SPEED, Math.max(MIN_TTS_SPEED, Number(speed)));
+}
+
+function getPatternSpeeds(word: WordEntry): number[] {
+  const count = Math.max(
+    word.patterns.length,
+    word.assets.patternTtsDurations?.length || 0,
+    word.assets.patternTtsPaths?.length || 0,
+    word.assets.patternTtsSpeeds?.length || 0,
+  );
+  return Array.from({ length: count }, (_, i) =>
+    normalizeTtsSpeed(word.assets.patternTtsSpeeds?.[i]),
+  );
+}
+
+function pickUnifiedWordSpeed(word: WordEntry): number {
+  const speeds = [
+    word.assets.chineseIntroTtsSpeed,
+    word.assets.chineseWordTtsSpeed,
+    word.assets.englishTtsSpeed,
+    ...(word.assets.patternTtsSpeeds || []),
+  ]
+    .filter((v) => Number.isFinite(v))
+    .map((v) => normalizeTtsSpeed(v));
+  return speeds[0] ?? DEFAULT_TTS_SPEED;
 }
 
 const url = (p?: string, version?: string) => {
@@ -61,12 +95,17 @@ export const AssetsPage: React.FC<Props> = ({ wordList, onRefresh }) => {
   const [statusMsg, setStatusMsg] = useState<Record<string, { ok: boolean; text: string }>>({});
   const [editingWordId, setEditingWordId] = useState<string | null>(null);
   const [draft, setDraft] = useState<WordDraft | null>(null);
+  const [renderVideoVersion, setRenderVideoVersion] = useState<Record<string, string>>({});
+  const [ttsGlobalSpeedDraft, setTtsGlobalSpeedDraft] = useState<Record<string, number>>({});
+  const bgmInputRef = useRef<HTMLInputElement | null>(null);
+  const bgVideoInputRef = useRef<HTMLInputElement | null>(null);
 
   const regen = async (
     key: string,
     endpoint: string,
     body?: object,
     onSuccess?: (data: any) => void,
+    successText: string | ((data: any) => string) = "生成完成",
   ) => {
     setLoading((p) => ({ ...p, [key]: true }));
     setStatusMsg((p) => ({ ...p, [key]: { ok: true, text: "请求中..." } }));
@@ -79,7 +118,9 @@ export const AssetsPage: React.FC<Props> = ({ wordList, onRefresh }) => {
       const data = await parseApiResponse(res);
       if (data.success) {
         onSuccess?.(data);
-        setStatusMsg((p) => ({ ...p, [key]: { ok: true, text: "生成完成" } }));
+        const resolvedSuccessText =
+          typeof successText === "function" ? successText(data) : successText;
+        setStatusMsg((p) => ({ ...p, [key]: { ok: true, text: resolvedSuccessText } }));
         onRefresh();
       } else {
         setStatusMsg((p) => ({ ...p, [key]: { ok: false, text: data.error || "失败" } }));
@@ -176,13 +217,177 @@ export const AssetsPage: React.FC<Props> = ({ wordList, onRefresh }) => {
     setDraftField("examples", draft.examples.filter((_, i) => i !== idx));
   };
 
-  const RegenBtn: React.FC<{ k: string; endpoint: string; body?: object; label: string; onSuccess?: (data: any) => void }> = ({ k, endpoint, body, label, onSuccess }) => {
+  const uploadPublicAsset = async (
+    assetType: "bgm" | "background",
+    file?: File,
+  ) => {
+    if (!file) return;
+
+    const key = `public-${assetType}-upload`;
+    setLoading((p) => ({ ...p, [key]: true }));
+    setStatusMsg((p) => ({ ...p, [key]: { ok: true, text: "上传中..." } }));
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const res = await fetch(
+        `/api/wordlists/${wordList.id}/public-assets/${assetType}`,
+        {
+          method: "POST",
+          body: formData,
+        },
+      );
+      const data = await parseApiResponse(res);
+
+      if (data.success) {
+        setStatusMsg((p) => ({
+          ...p,
+          [key]: { ok: true, text: "替换成功，后续渲染将使用当前词本素材" },
+        }));
+        onRefresh();
+      } else {
+        setStatusMsg((p) => ({
+          ...p,
+          [key]: { ok: false, text: data.error || "替换失败" },
+        }));
+      }
+    } catch (e: any) {
+      setStatusMsg((p) => ({
+        ...p,
+        [key]: { ok: false, text: e.message || "替换失败" },
+      }));
+    } finally {
+      setLoading((p) => ({ ...p, [key]: false }));
+    }
+  };
+
+  const rerenderFinalVideo = async (wordId: string) => {
+    const key = `${wordId}-render`;
+    setLoading((p) => ({ ...p, [key]: true }));
+    setStatusMsg((p) => ({
+      ...p,
+      [key]: { ok: true, text: "提交渲染任务中..." },
+    }));
+
+    try {
+      const submitRes = await fetch(`/api/render/${wordList.id}/${wordId}`, {
+        method: "POST",
+      });
+      const submitData = await parseApiResponse(submitRes);
+      if (!submitData.success || !submitData.data?.id) {
+        setStatusMsg((p) => ({
+          ...p,
+          [key]: { ok: false, text: submitData.error || "提交渲染任务失败" },
+        }));
+        return;
+      }
+
+      const jobId = submitData.data.id as string;
+      setStatusMsg((p) => ({
+        ...p,
+        [key]: { ok: true, text: `渲染任务已提交 (${jobId.slice(0, 8)}...)` },
+      }));
+
+      let completed = false;
+      while (!completed) {
+        await new Promise((r) => setTimeout(r, 5000));
+
+        const pollRes = await fetch(`/api/render/jobs/${jobId}`);
+        const pollData = await parseApiResponse(pollRes);
+        if (!pollData.success || !pollData.data) {
+          setStatusMsg((p) => ({
+            ...p,
+            [key]: { ok: false, text: pollData.error || "查询渲染进度失败" },
+          }));
+          return;
+        }
+
+        const job = pollData.data;
+        if (job.status === "done") {
+          completed = true;
+          const version = new Date().toISOString();
+          setRenderVideoVersion((p) => ({ ...p, [wordId]: version }));
+          setStatusMsg((p) => ({
+            ...p,
+            [key]: { ok: true, text: "渲染完成" },
+          }));
+          onRefresh();
+        } else if (job.status === "error") {
+          setStatusMsg((p) => ({
+            ...p,
+            [key]: { ok: false, text: job.error || "渲染失败" },
+          }));
+          return;
+        } else {
+          const progress = Math.max(
+            0,
+            Math.min(100, Math.round((Number(job.progress) || 0) * 100)),
+          );
+          setStatusMsg((p) => ({
+            ...p,
+            [key]: { ok: true, text: `渲染中 ${progress}%` },
+          }));
+        }
+      }
+    } catch (e: any) {
+      setStatusMsg((p) => ({
+        ...p,
+        [key]: { ok: false, text: e.message || "重新渲染失败" },
+      }));
+    } finally {
+      setLoading((p) => ({ ...p, [key]: false }));
+    }
+  };
+
+  const saveWordAssetsPatch = async (
+    word: WordEntry,
+    patch: Partial<WordAssets>,
+    key: string,
+    successText: string,
+  ) => {
+    setLoading((p) => ({ ...p, [key]: true }));
+    setStatusMsg((p) => ({ ...p, [key]: { ok: true, text: "保存中..." } }));
+
+    try {
+      const res = await fetch(`/api/wordlists/${wordList.id}/words/${word.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          assets: {
+            ...word.assets,
+            ...patch,
+          },
+        }),
+      });
+      const data = await parseApiResponse(res);
+      if (data.success) {
+        setStatusMsg((p) => ({ ...p, [key]: { ok: true, text: successText } }));
+        onRefresh();
+      } else {
+        setStatusMsg((p) => ({ ...p, [key]: { ok: false, text: data.error || "保存失败" } }));
+      }
+    } catch (e: any) {
+      setStatusMsg((p) => ({ ...p, [key]: { ok: false, text: e.message || "保存失败" } }));
+    } finally {
+      setLoading((p) => ({ ...p, [key]: false }));
+    }
+  };
+
+  const RegenBtn: React.FC<{
+    k: string;
+    endpoint: string;
+    body?: object;
+    label: string;
+    onSuccess?: (data: any) => void;
+    successText?: string | ((data: any) => string);
+  }> = ({ k, endpoint, body, label, onSuccess, successText }) => {
     const isLoading = loading[k];
     const msg = statusMsg[k];
     return (
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <button
-          onClick={() => regen(k, endpoint, body, onSuccess)}
+          onClick={() => regen(k, endpoint, body, onSuccess, successText)}
           disabled={isLoading}
           style={{ ...S.regenBtn, opacity: isLoading ? 0.5 : 1 }}
         >
@@ -196,21 +401,99 @@ export const AssetsPage: React.FC<Props> = ({ wordList, onRefresh }) => {
     );
   };
 
-  const AudioRow: React.FC<{ label: string; path?: string; dur?: number; regenKey?: string; regenEndpoint?: string; version?: string }> = ({ label, path, dur, regenKey, regenEndpoint, version }) => (
-    <div style={S.assetRow}>
-      <Volume2 size={14} color="#B0AAA4" />
-      <span style={S.assetLabel}>{label}</span>
-      {path ? (
-        <>
-          <audio controls src={url(path, version)} style={S.audio} preload="none" />
-          {dur != null && <span style={S.durBadge}>{dur.toFixed(1)}s</span>}
-        </>
-      ) : (
-        <span style={S.missing}>未生成</span>
-      )}
-      {regenKey && regenEndpoint && <RegenBtn k={regenKey} endpoint={regenEndpoint} label="重新生成" />}
-    </div>
-  );
+  const SpeedSelect: React.FC<{
+    value: number;
+    onChange: (speed: number) => void;
+    disabled?: boolean;
+  }> = ({ value, onChange, disabled }) => {
+    const normalized = normalizeTtsSpeed(value);
+    return (
+      <select
+        value={normalized.toFixed(2)}
+        disabled={disabled}
+        style={S.speedSelect}
+        onChange={(e) => onChange(Number(e.target.value))}
+      >
+        {SPEED_OPTIONS.map((s) => (
+          <option key={s} value={s.toFixed(2)}>
+            {s.toFixed(2)}x
+          </option>
+        ))}
+      </select>
+    );
+  };
+
+  const AudioRow: React.FC<{
+    label: string;
+    path?: string;
+    dur?: number;
+    speed?: number;
+    onSpeedChange?: (speed: number) => void;
+    speedLoadingKey?: string;
+    regenKey?: string;
+    regenEndpoint?: string;
+    version?: string;
+  }> = ({ label, path, dur, speed, onSpeedChange, speedLoadingKey, regenKey, regenEndpoint, version }) => {
+    const audioRef = useRef<HTMLAudioElement | null>(null);
+    const [localSpeed, setLocalSpeed] = useState<number>(
+      normalizeTtsSpeed(speed),
+    );
+
+    useEffect(() => {
+      setLocalSpeed(normalizeTtsSpeed(speed));
+    }, [speed]);
+
+    useEffect(() => {
+      if (audioRef.current) {
+        audioRef.current.playbackRate = normalizeTtsSpeed(localSpeed);
+      }
+    }, [localSpeed, path, version]);
+
+    const effectiveSpeed = normalizeTtsSpeed(localSpeed);
+    const renderDuration = dur != null ? dur / effectiveSpeed : undefined;
+    const applyPlaybackRate = () => {
+      if (audioRef.current) {
+        audioRef.current.playbackRate = normalizeTtsSpeed(localSpeed);
+      }
+    };
+
+    return (
+      <div style={S.assetRow}>
+        <Volume2 size={14} color="#B0AAA4" />
+        <span style={S.assetLabel}>{label}</span>
+        {path ? (
+          <>
+            <audio
+              ref={audioRef}
+              controls
+              src={url(path, version)}
+              style={S.audio}
+              preload="none"
+              onLoadedMetadata={applyPlaybackRate}
+              onPlay={applyPlaybackRate}
+            />
+            {renderDuration != null && (
+              <span style={S.durBadge}>渲染约 {renderDuration.toFixed(1)}s</span>
+            )}
+            {onSpeedChange && (
+              <SpeedSelect
+                value={localSpeed}
+                onChange={(next) => {
+                  const normalized = normalizeTtsSpeed(next);
+                  setLocalSpeed(normalized);
+                  onSpeedChange(normalized);
+                }}
+                disabled={speedLoadingKey ? !!loading[speedLoadingKey] : false}
+              />
+            )}
+          </>
+        ) : (
+          <span style={S.missing}>未生成</span>
+        )}
+        {regenKey && regenEndpoint && <RegenBtn k={regenKey} endpoint={regenEndpoint} label="重新生成" />}
+      </div>
+    );
+  };
 
   const renderEditor = (word: WordEntry) => {
     if (!draft || editingWordId !== word.id) return null;
@@ -356,7 +639,13 @@ export const AssetsPage: React.FC<Props> = ({ wordList, onRefresh }) => {
 
   const renderWord = (word: WordEntry) => {
     const a = word.assets;
+    const patternSpeeds = getPatternSpeeds(word);
+    const unifiedSpeed =
+      ttsGlobalSpeedDraft[word.id] != null
+        ? normalizeTtsSpeed(ttsGlobalSpeedDraft[word.id])
+        : pickUnifiedWordSpeed(word);
     const assetVersion = word.updatedAt || wordList.updatedAt || "";
+    const outputVersion = renderVideoVersion[word.id] || assetVersion;
     const isOpen = expanded === word.id;
     const isEditing = editingWordId === word.id;
     const base = `/api/generate`;
@@ -396,16 +685,127 @@ export const AssetsPage: React.FC<Props> = ({ wordList, onRefresh }) => {
                 <div style={S.assetSectionTitle}><Mic size={14} /> TTS 音频</div>
                 <RegenBtn k={`${word.id}-tts`} endpoint={`${base}/tts/${wordList.id}/${word.id}`} label="全部重新生成" />
               </div>
-              <AudioRow label="开场白" path={a.chineseIntroTtsPath} dur={a.chineseIntroTtsDuration} version={assetVersion}
-                regenKey={`${word.id}-intro`} regenEndpoint={`${base}/tts-single/${wordList.id}/${word.id}/chinese_intro`} />
-              <AudioRow label="中文介绍" path={a.chineseWordTtsPath} dur={a.chineseWordTtsDuration} version={assetVersion}
-                regenKey={`${word.id}-cnw`} regenEndpoint={`${base}/tts-single/${wordList.id}/${word.id}/chinese_word`} />
-              <AudioRow label="英文发音" path={a.englishTtsPath} dur={a.englishTtsDuration} version={assetVersion}
-                regenKey={`${word.id}-en`} regenEndpoint={`${base}/tts-single/${wordList.id}/${word.id}/english`} />
+              <div style={S.ttsSpeedPanel}>
+                <span style={S.ttsHint}>渲染语速默认 1.25x，可统一或单独调整</span>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <SpeedSelect
+                    value={unifiedSpeed}
+                    onChange={(next) =>
+                      setTtsGlobalSpeedDraft((p) => ({ ...p, [word.id]: next }))
+                    }
+                    disabled={!!loading[`${word.id}-speed-all`]}
+                  />
+                  <button
+                    type="button"
+                    style={{ ...S.materialActionBtn, padding: "6px 10px", fontSize: 12 }}
+                    disabled={!!loading[`${word.id}-speed-all`]}
+                    onClick={() => {
+                      const next = normalizeTtsSpeed(unifiedSpeed);
+                      const allPatternSpeeds = patternSpeeds.map(() => next);
+                      saveWordAssetsPatch(
+                        word,
+                        {
+                          chineseIntroTtsSpeed: next,
+                          chineseWordTtsSpeed: next,
+                          englishTtsSpeed: next,
+                          patternTtsSpeeds: allPatternSpeeds,
+                        },
+                        `${word.id}-speed-all`,
+                        "已统一更新本词 TTS 语速",
+                      );
+                    }}
+                  >
+                    统一应用
+                  </button>
+                  {statusMsg[`${word.id}-speed-all`] && (
+                    <span
+                      style={{
+                        fontSize: 11,
+                        color: statusMsg[`${word.id}-speed-all`].ok ? "#6B9E6B" : "#C05050",
+                      }}
+                    >
+                      {statusMsg[`${word.id}-speed-all`].text}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <AudioRow
+                label="开场白"
+                path={a.chineseIntroTtsPath}
+                dur={a.chineseIntroTtsDuration}
+                speed={a.chineseIntroTtsSpeed}
+                onSpeedChange={(next) =>
+                  saveWordAssetsPatch(
+                    word,
+                    { chineseIntroTtsSpeed: next },
+                    `${word.id}-speed-intro`,
+                    "开场白语速已更新",
+                  )
+                }
+                speedLoadingKey={`${word.id}-speed-intro`}
+                version={assetVersion}
+                regenKey={`${word.id}-intro`}
+                regenEndpoint={`${base}/tts-single/${wordList.id}/${word.id}/chinese_intro`}
+              />
+              <AudioRow
+                label="中文介绍"
+                path={a.chineseWordTtsPath}
+                dur={a.chineseWordTtsDuration}
+                speed={a.chineseWordTtsSpeed}
+                onSpeedChange={(next) =>
+                  saveWordAssetsPatch(
+                    word,
+                    { chineseWordTtsSpeed: next },
+                    `${word.id}-speed-cnw`,
+                    "中文语速已更新",
+                  )
+                }
+                speedLoadingKey={`${word.id}-speed-cnw`}
+                version={assetVersion}
+                regenKey={`${word.id}-cnw`}
+                regenEndpoint={`${base}/tts-single/${wordList.id}/${word.id}/chinese_word`}
+              />
+              <AudioRow
+                label="英文发音"
+                path={a.englishTtsPath}
+                dur={a.englishTtsDuration}
+                speed={a.englishTtsSpeed}
+                onSpeedChange={(next) =>
+                  saveWordAssetsPatch(
+                    word,
+                    { englishTtsSpeed: next },
+                    `${word.id}-speed-en`,
+                    "英语语速已更新",
+                  )
+                }
+                speedLoadingKey={`${word.id}-speed-en`}
+                version={assetVersion}
+                regenKey={`${word.id}-en`}
+                regenEndpoint={`${base}/tts-single/${wordList.id}/${word.id}/english`}
+              />
               {(word.patterns || []).map((pat, i) => (
                 <div key={i}>
-                  <AudioRow label={`句式 ${i + 1}`} path={a.patternTtsPaths?.[i]} dur={a.patternTtsDurations?.[i]} version={assetVersion}
-                    regenKey={`${word.id}-pat${i}`} regenEndpoint={`${base}/tts-single/${wordList.id}/${word.id}/pattern_${i}`} />
+                  <AudioRow
+                    label={`句式 ${i + 1}`}
+                    path={a.patternTtsPaths?.[i]}
+                    dur={a.patternTtsDurations?.[i]}
+                    speed={patternSpeeds[i]}
+                    onSpeedChange={(next) => {
+                      const nextSpeeds = [...patternSpeeds];
+                      nextSpeeds[i] = next;
+                      saveWordAssetsPatch(
+                        word,
+                        { patternTtsSpeeds: nextSpeeds },
+                        `${word.id}-speed-pat-${i}`,
+                        `句式 ${i + 1} 语速已更新`,
+                      );
+                    }}
+                    speedLoadingKey={`${word.id}-speed-pat-${i}`}
+                    version={assetVersion}
+                    regenKey={`${word.id}-pat${i}`}
+                    regenEndpoint={`${base}/tts-single/${wordList.id}/${word.id}/pattern_${i}`}
+                  />
                   <div style={{ fontSize: 12, color: "#8A8580", paddingLeft: 30, paddingBottom: 4 }}>
                     {pat}
                     {word.patternTranslations?.[i] && <span style={{ color: "#B0AAA4" }}> — {word.patternTranslations[i]}</span>}
@@ -433,7 +833,22 @@ export const AssetsPage: React.FC<Props> = ({ wordList, onRefresh }) => {
             <div style={S.assetSection}>
               <div style={S.assetSectionHeader}>
                 <div style={S.assetSectionTitle}><Film size={14} /> AI 示例视频</div>
-                <RegenBtn k={`${word.id}-vid`} endpoint={`${base}/video/${wordList.id}/${word.id}`} body={{ confirmed: true }} label="全部重生成" />
+                <RegenBtn
+                  k={`${word.id}-vid`}
+                  endpoint={`${base}/video/${wordList.id}/${word.id}`}
+                  body={{ confirmed: true }}
+                  label="全部重生成"
+                  successText={(resp) => {
+                    const meta = resp?.meta;
+                    if (meta?.subtitleAutoRegenerated) {
+                      return "视频已重生，字幕已自动同步";
+                    }
+                    if (meta?.subtitleAutoError) {
+                      return `视频已重生，字幕自动同步失败：${meta.subtitleAutoError}`;
+                    }
+                    return "视频已重生";
+                  }}
+                />
               </div>
               {a.exampleVideoPaths?.length ? (
                 <div style={S.videoGrid}>
@@ -492,12 +907,80 @@ export const AssetsPage: React.FC<Props> = ({ wordList, onRefresh }) => {
               )}
             </div>
 
+            {/* 视频封面 */}
+            <div style={S.assetSection}>
+              <div style={S.assetSectionHeader}>
+                <div style={S.assetSectionTitle}><ImageIcon size={14} /> 视频封面</div>
+                <RegenBtn
+                  k={`${word.id}-cover`}
+                  endpoint={`/api/render/cover/${wordList.id}/${word.id}`}
+                  label="重新生成封面"
+                />
+              </div>
+
+              {(a.videoCover4x3Path || a.videoCover16x9Path) ? (
+                <div style={S.coverGrid}>
+                  <div style={S.coverCard}>
+                    <div style={S.coverLabel}>4:3</div>
+                    <div style={S.coverFrame43}>
+                      {a.videoCover4x3Path ? (
+                        <img src={url(a.videoCover4x3Path, assetVersion)} alt={`${word.word}-4:3-cover`} style={S.coverImg} />
+                      ) : (
+                        <div style={S.emptyAsset}>暂无封面</div>
+                      )}
+                    </div>
+                  </div>
+                  <div style={S.coverCard}>
+                    <div style={S.coverLabel}>16:9</div>
+                    <div style={S.coverFrame169}>
+                      {a.videoCover16x9Path ? (
+                        <img src={url(a.videoCover16x9Path, assetVersion)} alt={`${word.word}-16:9-cover`} style={S.coverImg} />
+                      ) : (
+                        <div style={S.emptyAsset}>暂无封面</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div style={S.emptyAsset}>暂无封面</div>
+              )}
+            </div>
+
             {/* 成片 */}
             {word.status === "rendered" && (
               <div style={S.assetSection}>
-                <div style={S.assetSectionTitle}><MonitorPlay size={14} /> 成片视频</div>
+                <div style={S.assetSectionHeader}>
+                  <div style={S.assetSectionTitle}><MonitorPlay size={14} /> 成片视频</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <button
+                      onClick={() => rerenderFinalVideo(word.id)}
+                      disabled={!!loading[`${word.id}-render`]}
+                      style={{
+                        ...S.regenBtn,
+                        opacity: loading[`${word.id}-render`] ? 0.5 : 1,
+                      }}
+                    >
+                      {loading[`${word.id}-render`] ? (
+                        <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} />
+                      ) : (
+                        <RefreshCw size={12} />
+                      )}
+                      重新渲染成片
+                    </button>
+                    {statusMsg[`${word.id}-render`] && (
+                      <span
+                        style={{
+                          fontSize: 11,
+                          color: statusMsg[`${word.id}-render`].ok ? "#6B9E6B" : "#C05050",
+                        }}
+                      >
+                        {statusMsg[`${word.id}-render`].text}
+                      </span>
+                    )}
+                  </div>
+                </div>
                 <div style={S.mediaFrame}>
-                  <video src={`/output/${word.id}.mp4?v=${encodeURIComponent(assetVersion)}`} controls style={S.videoPlayer} preload="metadata" />
+                  <video src={`/output/${word.id}.mp4?v=${encodeURIComponent(outputVersion)}`} controls style={S.videoPlayer} preload="metadata" />
                 </div>
               </div>
             )}
@@ -515,13 +998,19 @@ export const AssetsPage: React.FC<Props> = ({ wordList, onRefresh }) => {
         if (w.assets.imagePath) a.img++;
         if (w.assets.exampleVideoPaths?.length) a.vid++;
         if (w.assets.subtitleData?.length) a.sub++;
+        if (w.assets.videoCover4x3Path || w.assets.videoCover16x9Path) a.cover++;
         if (w.status === "rendered") a.done++;
         return a;
       },
-      { tts: 0, img: 0, vid: 0, sub: 0, done: 0 },
+      { tts: 0, img: 0, vid: 0, sub: 0, cover: 0, done: 0 },
     );
     return { total, counts };
   }, [wordList.words]);
+
+  const publicAssetVersion = wordList.updatedAt || "";
+  const listBgmPath = wordList.config?.media?.bgmPath || "audio/bgm.mp3";
+  const listBackgroundVideoPath =
+    wordList.config?.media?.backgroundVideoPath || "videos/background.mp4";
 
   return (
     <div>
@@ -533,6 +1022,7 @@ export const AssetsPage: React.FC<Props> = ({ wordList, onRefresh }) => {
             { v: stats.counts.img, l: "插图", icon: <ImageIcon size={18} /> },
             { v: stats.counts.vid, l: "AI 视频", icon: <Film size={18} /> },
             { v: stats.counts.sub, l: "字幕", icon: <Captions size={18} /> },
+            { v: stats.counts.cover, l: "视频封面", icon: <ImageIcon size={18} /> },
             { v: stats.counts.done, l: "已渲染", icon: <MonitorPlay size={18} /> },
           ].map((s) => (
             <div key={s.l} style={S.statCard}>
@@ -548,14 +1038,100 @@ export const AssetsPage: React.FC<Props> = ({ wordList, onRefresh }) => {
         <h3 style={{ ...S.sectionTitle, marginBottom: 12 }}>公共素材</h3>
         <div style={S.publicMediaGrid}>
           <div style={S.materialCard}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}><Music size={16} color="#C8956C" /> <span style={{ fontWeight: 600, fontSize: 14 }}>BGM</span></div>
-            <audio controls src="/public/audio/bgm.mp3" style={{ width: "100%" }} preload="none" />
+            <div style={S.materialHeader}>
+              <div style={S.materialTitle}>
+                <Music size={16} color="#C8956C" />
+                <span style={{ fontWeight: 600, fontSize: 14 }}>BGM</span>
+              </div>
+              <button
+                type="button"
+                style={{
+                  ...S.materialActionBtn,
+                  opacity: loading["public-bgm-upload"] ? 0.6 : 1,
+                }}
+                disabled={!!loading["public-bgm-upload"]}
+                onClick={() => bgmInputRef.current?.click()}
+              >
+                {loading["public-bgm-upload"] ? (
+                  <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} />
+                ) : (
+                  <RefreshCw size={12} />
+                )}
+                替换
+              </button>
+              <input
+                ref={bgmInputRef}
+                type="file"
+                accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  uploadPublicAsset("bgm", file);
+                  e.currentTarget.value = "";
+                }}
+              />
+            </div>
+            <audio controls src={url(listBgmPath, publicAssetVersion)} style={{ width: "100%" }} preload="none" />
+            <div style={S.materialMeta}>当前词本路径：{listBgmPath}</div>
+            {statusMsg["public-bgm-upload"] && (
+              <div
+                style={{
+                  ...S.materialMsg,
+                  color: statusMsg["public-bgm-upload"].ok ? "#6B9E6B" : "#C05050",
+                }}
+              >
+                {statusMsg["public-bgm-upload"].text}
+              </div>
+            )}
           </div>
           <div style={S.materialCard}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}><MonitorPlay size={16} color="#C8956C" /> <span style={{ fontWeight: 600, fontSize: 14 }}>背景视频</span></div>
-            <div style={S.mediaFrame}>
-              <video src="/public/videos/background.mp4" controls muted style={S.videoPlayer} preload="metadata" />
+            <div style={S.materialHeader}>
+              <div style={S.materialTitle}>
+                <MonitorPlay size={16} color="#C8956C" />
+                <span style={{ fontWeight: 600, fontSize: 14 }}>背景视频</span>
+              </div>
+              <button
+                type="button"
+                style={{
+                  ...S.materialActionBtn,
+                  opacity: loading["public-background-upload"] ? 0.6 : 1,
+                }}
+                disabled={!!loading["public-background-upload"]}
+                onClick={() => bgVideoInputRef.current?.click()}
+              >
+                {loading["public-background-upload"] ? (
+                  <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} />
+                ) : (
+                  <RefreshCw size={12} />
+                )}
+                替换
+              </button>
+              <input
+                ref={bgVideoInputRef}
+                type="file"
+                accept="video/*,.mp4,.mov,.webm,.mkv"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  uploadPublicAsset("background", file);
+                  e.currentTarget.value = "";
+                }}
+              />
             </div>
+            <div style={S.mediaFrame}>
+              <video src={url(listBackgroundVideoPath, publicAssetVersion)} controls muted style={S.videoPlayer} preload="metadata" />
+            </div>
+            <div style={S.materialMeta}>当前词本路径：{listBackgroundVideoPath}</div>
+            {statusMsg["public-background-upload"] && (
+              <div
+                style={{
+                  ...S.materialMsg,
+                  color: statusMsg["public-background-upload"].ok ? "#6B9E6B" : "#C05050",
+                }}
+              >
+                {statusMsg["public-background-upload"].text}
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -576,10 +1152,15 @@ const Mic: React.FC<{ size: number }> = ({ size }) => <Volume2 size={size} />;
 const S: Record<string, React.CSSProperties> = {
   section: { backgroundColor: "#fff", borderRadius: 12, border: "1px solid #E8E3DD", padding: 24, marginBottom: 24 },
   sectionTitle: { fontSize: 20, fontWeight: 700, fontFamily: "'Noto Serif SC', Georgia, serif", color: "#2D2A26", margin: 0 },
-  statGrid: { display: "grid", gridTemplateColumns: "repeat(5, minmax(120px, 1fr))", gap: 12 },
+  statGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 12 },
   statCard: { padding: 20, backgroundColor: "#FAFAF8", borderRadius: 10, border: "1px solid #E8E3DD", textAlign: "center" as const },
   publicMediaGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16 },
   materialCard: { padding: 16, backgroundColor: "#FAFAF8", borderRadius: 10, border: "1px solid #E8E3DD" },
+  materialHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 10 },
+  materialTitle: { display: "flex", alignItems: "center", gap: 8 },
+  materialActionBtn: { display: "flex", alignItems: "center", gap: 4, padding: "4px 10px", border: "1px solid #E0DBD4", borderRadius: 6, fontSize: 11, color: "#6B6560", backgroundColor: "#fff" },
+  materialMeta: { marginTop: 8, fontSize: 11, color: "#8A8580", wordBreak: "break-all" as const },
+  materialMsg: { marginTop: 6, fontSize: 11 },
   wordCard: { border: "1px solid #E8E3DD", borderRadius: 10, overflow: "hidden" },
   wordHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 20px", cursor: "pointer", backgroundColor: "#FAFAF8" },
   editBtn: { display: "flex", alignItems: "center", gap: 4, padding: "5px 10px", fontSize: 11, border: "1px solid #E0DBD4", borderRadius: 6, backgroundColor: "#fff", color: "#6B6560" },
@@ -604,6 +1185,9 @@ const S: Record<string, React.CSSProperties> = {
   assetSection: { marginTop: 16, padding: 16, backgroundColor: "#FAFAF8", borderRadius: 8, border: "1px solid #E8E3DD" },
   assetSectionHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 },
   assetSectionTitle: { display: "flex", alignItems: "center", gap: 6, fontSize: 14, fontWeight: 600, color: "#2D2A26", margin: 0 },
+  ttsSpeedPanel: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" as const, padding: "8px 10px", marginBottom: 8, borderRadius: 8, backgroundColor: "#F7F4F0", border: "1px solid #EEE8E1" },
+  ttsHint: { fontSize: 12, color: "#8A8580" },
+  speedSelect: { height: 30, padding: "0 8px", border: "1px solid #E0DBD4", borderRadius: 6, backgroundColor: "#fff", color: "#5A534D", fontSize: 12 },
   assetRow: { display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px solid #F0EDE8", flexWrap: "wrap" as const },
   assetLabel: { fontSize: 13, color: "#8A8580", minWidth: 80, flexShrink: 0 },
   audio: { height: 32, flex: 1, minWidth: 180, maxWidth: 320 },
@@ -616,6 +1200,12 @@ const S: Record<string, React.CSSProperties> = {
   videoPlayer: { width: "100%", height: "100%", objectFit: "contain" as const, display: "block" },
   videoDur: { padding: "8px 12px", fontSize: 12, color: "#8A8580" },
   inlineBtns: { display: "flex", padding: "0 12px 10px" },
+  coverGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 12 },
+  coverCard: { border: "1px solid #E8E3DD", borderRadius: 8, overflow: "hidden", backgroundColor: "#fff" },
+  coverLabel: { padding: "8px 10px", fontSize: 12, color: "#8A8580", borderBottom: "1px solid #F0EDE8", fontWeight: 600 },
+  coverFrame43: { width: "100%", aspectRatio: "4 / 3", backgroundColor: "#F5F2EE" },
+  coverFrame169: { width: "100%", aspectRatio: "16 / 9", backgroundColor: "#F5F2EE" },
+  coverImg: { width: "100%", height: "100%", objectFit: "cover" as const, display: "block" },
   subGroup: { backgroundColor: "#fff", borderRadius: 8, padding: 12, marginBottom: 8, border: "1px solid #E8E3DD" },
   subLine: { display: "flex", gap: 12, padding: "4px 0", borderBottom: "1px solid #F0EDE8", fontSize: 13 },
   subTime: { color: "#B0AAA4", fontFamily: "monospace", fontSize: 11, minWidth: 80, flexShrink: 0 },

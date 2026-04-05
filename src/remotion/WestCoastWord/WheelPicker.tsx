@@ -12,7 +12,7 @@ interface WheelPickerProps {
 }
 
 const ITEM_HEIGHT = 120;
-const TOTAL_FRAMES = 85;
+const TOTAL_FRAMES = 64;
 // 显示在可视窗口中的项数
 const VISIBLE_ITEMS = 1;
 
@@ -92,7 +92,7 @@ export const WheelPicker: React.FC<WheelPickerProps> = ({
                   fontSize,
                   fontWeight: 900,
                   fontFamily: "'Noto Sans SC', sans-serif",
-                  color: "#ffffff",
+                  color: i === targetIndex ? targetColor : "#ffffff",
                   opacity,
                   transform: `translateY(${y}px)`,
                   lineHeight: 1,
@@ -113,7 +113,7 @@ export const FlashEffect: React.FC<{ triggerFrame: number }> = ({
   triggerFrame,
 }) => {
   const frame = useCurrentFrame();
-  const FLASH_DURATION = 30;
+  const FLASH_DURATION = 25;
   const localFrame = frame - triggerFrame;
 
   if (localFrame < 0 || localFrame > FLASH_DURATION) return null;

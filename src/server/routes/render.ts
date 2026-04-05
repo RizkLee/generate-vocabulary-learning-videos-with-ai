@@ -3,10 +3,12 @@ import path from "path";
 import fs from "fs";
 import type { RenderJob, WordList } from "../../types/index.js";
 import { v4 as uuid } from "uuid";
+import { generateWordCovers } from "../../services/cover.js";
 
 const router = Router();
 const DATA_DIR = path.resolve("data/wordlists");
 const OUTPUT_DIR = path.resolve("output");
+const PUBLIC_DIR = path.resolve("public");
 
 // 渲染任务存储 (内存)
 const renderJobs = new Map<string, RenderJob>();
@@ -15,6 +17,13 @@ function loadList(listId: string): WordList | null {
   const file = path.join(DATA_DIR, `${listId}.json`);
   if (!fs.existsSync(file)) return null;
   return JSON.parse(fs.readFileSync(file, "utf-8"));
+}
+
+function saveList(list: WordList): void {
+  fs.writeFileSync(
+    path.join(DATA_DIR, `${list.id}.json`),
+    JSON.stringify(list, null, 2),
+  );
 }
 
 // 提交渲染任务
@@ -71,6 +80,28 @@ router.get("/output/:wordId", (req, res) => {
   res.sendFile(file);
 });
 
+// 重新生成视频封面（4:3 + 16:9）
+router.post("/cover/:listId/:wordId", (req, res) => {
+  try {
+    const list = loadList(req.params.listId);
+    if (!list) return res.status(404).json({ success: false, error: "未找到" });
+
+    const word = list.words.find((w) => w.id === req.params.wordId);
+    if (!word) return res.status(404).json({ success: false, error: "单词未找到" });
+
+    const result = generateWordCovers(list, word, PUBLIC_DIR);
+    word.assets.videoCover4x3Path = result.cover4x3Path;
+    word.assets.videoCover16x9Path = result.cover16x9Path;
+    word.updatedAt = new Date().toISOString();
+    list.updatedAt = word.updatedAt;
+    saveList(list);
+
+    res.json({ success: true, data: word });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 const CHROME_PATH = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 
 /** 执行实际渲染 */
@@ -99,10 +130,14 @@ async function renderWord(
   const word = list.words.find((w) => w.id === wordId);
   if (!word) throw new Error("单词未找到");
 
+  const bgVideoSrc =
+    list.config?.media?.backgroundVideoPath || "videos/background.mp4";
+  const bgmSrc = list.config?.media?.bgmPath || "audio/bgm.mp3";
+
   const inputProps = {
     word,
-    bgVideoSrc: "videos/background.mp4",
-    bgmSrc: "audio/bgm.mp3",
+    bgVideoSrc,
+    bgmSrc,
     fps: 30,
     previewMode: false,
   };
@@ -141,10 +176,21 @@ async function renderWord(
     if (updatedWord) {
       updatedWord.status = "rendered";
       updatedWord.updatedAt = new Date().toISOString();
-      fs.writeFileSync(
-        path.join(DATA_DIR, `${listId}.json`),
-        JSON.stringify(updatedList, null, 2),
-      );
+
+      try {
+        const coverResult = generateWordCovers(
+          updatedList,
+          updatedWord,
+          PUBLIC_DIR,
+        );
+        updatedWord.assets.videoCover4x3Path = coverResult.cover4x3Path;
+        updatedWord.assets.videoCover16x9Path = coverResult.cover16x9Path;
+      } catch (err: any) {
+        console.warn(`[Render] 自动生成封面失败，跳过: ${err.message}`);
+      }
+
+      updatedList.updatedAt = updatedWord.updatedAt;
+      saveList(updatedList);
     }
   }
 }

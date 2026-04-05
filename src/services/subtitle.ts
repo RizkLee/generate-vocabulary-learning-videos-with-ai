@@ -16,6 +16,8 @@ function getAI(): GoogleGenAI {
 export function resetSubtitleClient() { _ai = null; }
 
 const FFMPEG_PATH = process.env.FFMPEG_PATH || "ffmpeg";
+const MAX_SUBTITLE_GAP_SEC = 0.2;
+const TIMESTAMP_PRECISION = 3;
 
 /** 从文本中提取 JSON（处理可能的 markdown 包裹） */
 function extractJson(text: string): string {
@@ -31,6 +33,45 @@ function extractAudio(videoPath: string): string {
     { stdio: "pipe" },
   );
   return audioPath;
+}
+
+/**
+ * 收紧相邻字幕片段之间的时间间隔。
+ * 若 gap > 0.2s，则将下一句 startTime 修正为上一句 endTime + 0.2s。
+ */
+function tightenSubtitleTimeline(segments: SubtitleSegment[]): SubtitleSegment[] {
+  if (!Array.isArray(segments) || segments.length <= 1) return segments;
+
+  const next = segments.map((seg) => ({
+    ...seg,
+    startTime: Number(seg.startTime),
+    endTime: Number(seg.endTime),
+  }));
+
+  for (let i = 1; i < next.length; i++) {
+    const prev = next[i - 1];
+    const curr = next[i];
+
+    if (!Number.isFinite(prev.endTime) || !Number.isFinite(curr.startTime)) {
+      continue;
+    }
+
+    const gap = curr.startTime - prev.endTime;
+    if (gap > MAX_SUBTITLE_GAP_SEC + 1e-6) {
+      const adjustedStart = Number(
+        (prev.endTime + MAX_SUBTITLE_GAP_SEC).toFixed(TIMESTAMP_PRECISION),
+      );
+
+      curr.startTime = adjustedStart;
+
+      // 兜底保护：避免异常数据导致 startTime 超过 endTime
+      if (Number.isFinite(curr.endTime) && curr.startTime > curr.endTime) {
+        curr.startTime = curr.endTime;
+      }
+    }
+  }
+
+  return next;
 }
 
 /** 带重试的 Gemini 调用 */
@@ -137,9 +178,11 @@ export async function generateSubtitles(
   const transcription = await callWithRetry(() => transcribeAudio(audioPath, modelOverride));
 
   // 3. 校验 (带重试)
-  const segments = await callWithRetry(() =>
+  const verifiedSegments = await callWithRetry(() =>
     verifySubtitles(transcription, originalEnglish, originalChinese, modelOverride),
   );
+
+  const segments = tightenSubtitleTimeline(verifiedSegments);
 
   // 清理临时音频文件
   try {

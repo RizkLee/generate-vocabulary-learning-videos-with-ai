@@ -12,16 +12,22 @@ export interface WordAssets {
   chineseTtsDuration?: number;
   chineseIntroTtsPath?: string;      // "每天1个西海岸单词" 固定开场白
   chineseIntroTtsDuration?: number;
+  chineseIntroTtsSpeed?: number;
   chineseWordTtsPath?: string;       // "今天要学习的单词是：xxx" 每词不同
   chineseWordTtsDuration?: number;
+  chineseWordTtsSpeed?: number;
   englishTtsPath?: string;
   englishTtsDuration?: number;
+  englishTtsSpeed?: number;
   patternTtsPaths?: string[];
   patternTtsDurations?: number[];
+  patternTtsSpeeds?: number[];
   imagePath?: string;
   exampleVideoPaths?: string[];
   exampleVideoDurations?: number[];
   subtitleData?: SubtitleSegment[][];
+  videoCover4x3Path?: string;
+  videoCover16x9Path?: string;
 }
 
 export type WordStatus =
@@ -65,6 +71,17 @@ export interface WordListConfigOverride {
     chineseWordTemplate: string;
     englishWordTemplate: string;
   }>;
+  cover?: Partial<{
+    backgroundImagePath: string;
+    titlePrefix: string;
+    titleHighlight: string;
+    titleSuffix: string;
+    highlightColor: string;
+  }>;
+  media?: Partial<{
+    bgmPath: string;
+    backgroundVideoPath: string;
+  }>;
 }
 
 export interface WordList {
@@ -79,7 +96,7 @@ export interface WordList {
 
 // ===== Remotion Props =====
 
-export interface WestCoastWordProps {
+export interface WestCoastWordProps extends Record<string, unknown> {
   word: WordEntry;
   bgVideoSrc: string;
   bgmSrc: string;

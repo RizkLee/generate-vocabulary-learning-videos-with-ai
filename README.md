@@ -10,6 +10,7 @@
 - **智能字幕**：AI 转录 + 校验，生成精确时间戳的中英双语字幕
 - **图片搜索**：Pixabay API 自动搜索单词相关插图
 - **视频渲染**：Remotion 将所有素材合成为竖屏短视频
+- **自动视频封面**：单词视频渲染完成后，自动生成 4:3 和 16:9 两张横版封面图
 - **资源管理**：Web UI 中预览、替换、重新生成任意单个素材
 - **配置中心**：支持“全局默认 + 单词本覆盖”两层配置（模型与提示词可按词库单独设置）
 - **文本可编辑与细粒度重生成**：可在“素材”页手动编辑单词、释义、句式、例句，并按整词/模块/单条进行 AI 重生成
@@ -83,9 +84,9 @@ ShortVideos_Claude/
 │   ├── wordlists/                   # 单词本 JSON 文件
 │   └── cost-log.json                # 费用记录
 ├── public/                          # Remotion 静态资源
-│   ├── audio/                       # TTS 音频 + BGM
-│   ├── images/                      # 插图
-│   └── videos/                      # 背景视频 + AI 视频
+│   ├── audio/                       # TTS 音频 + BGM（按 listId/wordId 分层）
+│   ├── images/                      # 插图 + 封面（按 listId/wordId 分层）
+│   └── videos/                      # 背景视频 + AI 视频（AI 视频按 listId 分层）
 ├── Material/                        # 用户素材（BGM、背景视频）
 ├── output/                          # 渲染成品
 ├── package.json
@@ -183,6 +184,10 @@ npm run dev:remotion
   - 单条 TTS（开场白/中文介绍/英文发音/任一句式）
   - 单条示例视频（按 `exampleIndex`）
   - 单条字幕（按 `exampleIndex`）
+- 渲染完成后会自动生成两张封面：
+  - `4:3`（如小红书图文封面）
+  - `16:9`（如视频平台横版封面）
+- 可在词条详情中点击“重新生成封面”单独重做封面
 - 重新生成后可重新渲染视频
 
 ### 4. 渲染视频
@@ -203,6 +208,10 @@ npx tsx render.ts
 - 作用域切换：
   - **全局默认**：影响所有单词本
   - **当前词库覆盖**：仅影响当前选中的单词本（留空字段会继承全局默认）
+- 词库封面配置（当前词库覆盖）：
+  - 封面背景图路径（默认 `Material/video-cover.png`，首次生成时自动复制到 `public/images/video-cover.png`）
+  - 标题前缀、高亮词、标题后缀
+  - 高亮颜色（如 `#F5A623`）
 - API Key（Pixabay）
 - GCP 项目/区域
 - AI 模型名称
@@ -223,6 +232,11 @@ npx tsx render.ts
   - 仅重生成指定视频字幕
 
 这些接口用于避免整词全量重跑，节省时间和成本。
+
+另有封面接口：
+
+- `POST /api/render/cover/:listId/:wordId`
+  - 单独重生成该词条封面（4:3 + 16:9）
 
 ## 常见问题
 
@@ -263,21 +277,29 @@ npx tsx render.ts
   ],
   "status": "pending | content_ready | assets_ready | rendered",
   "assets": {
-    "chineseIntroTtsPath": "audio/chinese_intro.wav",
+    "chineseIntroTtsPath": "audio/test-001/w-vibe/chinese_intro.wav",
     "chineseIntroTtsDuration": 3.41,
-    "chineseWordTtsPath": "audio/w-vibe_chinese_word.wav",
+    "chineseWordTtsPath": "audio/test-001/w-vibe/chinese_word.wav",
     "chineseWordTtsDuration": 4.85,
-    "englishTtsPath": "audio/w-vibe_english.wav",
+    "englishTtsPath": "audio/test-001/w-vibe/english.wav",
     "englishTtsDuration": 6.21,
-    "patternTtsPaths": ["audio/w-vibe_pattern_0.wav", "..."],
+    "patternTtsPaths": ["audio/test-001/w-vibe/pattern_0.wav", "..."],
     "patternTtsDurations": [2.85, 2.45, 3.29],
-    "imagePath": "images/w-vibe.jpg",
-    "exampleVideoPaths": ["videos/w-vibe_example_0.mp4", "videos/w-vibe_example_1.mp4"],
+    "imagePath": "images/test-001/w-vibe/image.jpg",
+    "videoCover4x3Path": "images/test-001/w-vibe/cover_4_3.jpg",
+    "videoCover16x9Path": "images/test-001/w-vibe/cover_16_9.jpg",
+    "exampleVideoPaths": ["videos/test-001/w-vibe_example_0.mp4", "videos/test-001/w-vibe_example_1.mp4"],
     "exampleVideoDurations": [8, 8],
     "subtitleData": [[{"text": "...", "translation": "...", "startTime": 0, "endTime": 5.17}]]
   }
 }
 ```
+
+资源路径规范（相对 `public/`）：
+
+- 音频：`audio/<listId>/<wordId>/...`
+- 图片/封面：`images/<listId>/<wordId>/...`
+- 示例视频：`videos/<listId>/<wordId>_example_<index>.mp4`
 
 ### 字段说明
 

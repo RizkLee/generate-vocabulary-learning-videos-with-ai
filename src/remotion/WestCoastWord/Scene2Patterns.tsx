@@ -12,6 +12,7 @@ import {
 } from "remotion";
 import type { WestCoastWordProps } from "../../types/index";
 import type { getSceneFrames } from "./calculateMetadata";
+import { getPatternEffectiveDurations, normalizeTtsSpeed } from "./calculateMetadata";
 
 interface Scene2Props extends WestCoastWordProps {
   sceneFrames: ReturnType<typeof getSceneFrames>;
@@ -32,7 +33,7 @@ export const Scene2Patterns: React.FC<Scene2Props> = ({
   });
 
   // 计算每个句式的播放起始帧
-  const patternDurations = word.assets.patternTtsDurations || [2, 2, 2];
+  const patternDurations = getPatternEffectiveDurations(word);
   const patternStartFrames: number[] = [];
   let accum = sceneTransitionFrames + 15;
   for (let i = 0; i < patternDurations.length; i++) {
@@ -205,7 +206,11 @@ export const Scene2Patterns: React.FC<Scene2Props> = ({
       {/* 句式 TTS 音频 */}
       {word.assets.patternTtsPaths?.map((p, i) => (
         <Sequence key={i} from={patternStartFrames[i]}>
-          <Audio src={staticFile(p)} volume={1} />
+          <Audio
+            src={staticFile(p)}
+            volume={1}
+            playbackRate={normalizeTtsSpeed(word.assets.patternTtsSpeeds?.[i])}
+          />
         </Sequence>
       ))}
     </AbsoluteFill>

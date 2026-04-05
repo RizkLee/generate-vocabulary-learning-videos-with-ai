@@ -14,6 +14,11 @@ const defaultWord: WestCoastWordProps["word"] = {
     "I'm just vibing right now.",
     "This place has a chill vibe.",
   ],
+  patternTranslations: [
+    "今天的感觉不太对。",
+    "我现在就是随性放松一下。",
+    "这个地方的氛围很松弛。",
+  ],
   examples: [
     {
       english:

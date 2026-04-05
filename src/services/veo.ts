@@ -17,6 +17,14 @@ function getAI(): GoogleGenAI {
 }
 export function resetVeoClient() { _ai = null; }
 
+function toPublicRel(...parts: string[]): string {
+  return path.posix.join(
+    ...parts
+      .filter((p) => !!p)
+      .map((p) => p.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "")),
+  );
+}
+
 function boostVideoAudioVolume(videoPath: string, factor: number): void {
   const ext = path.extname(videoPath);
   const base = path.basename(videoPath, ext);
@@ -120,6 +128,7 @@ export async function generateExampleVideos(
   outputDir: string,
   wordId: string,
   overrides?: VeoGenerationOverrides,
+  relativeDir = "videos",
 ): Promise<{ paths: string[]; durations: number[] }> {
   const paths: string[] = [];
   const durations: number[] = [];
@@ -127,7 +136,7 @@ export async function generateExampleVideos(
   for (let i = 0; i < examples.length; i++) {
     const outputPath = path.join(outputDir, `${wordId}_example_${i}.mp4`);
     const result = await generateVideo(word, examples[i].english, outputPath, overrides);
-    paths.push(`videos/${wordId}_example_${i}.mp4`);
+    paths.push(toPublicRel(relativeDir, `${wordId}_example_${i}.mp4`));
     durations.push(result.durationSec);
   }
 

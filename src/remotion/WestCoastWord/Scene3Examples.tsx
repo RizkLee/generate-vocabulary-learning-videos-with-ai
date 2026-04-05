@@ -110,7 +110,7 @@ export const Scene3Examples: React.FC<Scene3Props> = ({
                       height: "100%",
                       objectFit: "cover",
                     }}
-                    volume={2.5}
+                    volume={3.5}
                   />
                 </Sequence>
               ) : (

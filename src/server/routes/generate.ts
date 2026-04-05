@@ -6,7 +6,7 @@ import { generateWordContent, generateWordList } from "../../services/gemini-con
 import {
   generateChineseTts,
   generateEnglishTts,
-  generatePatternsTts,
+  type TtsOverrides,
 } from "../../services/gemini-tts.js";
 import { fetchAndSaveImage } from "../../services/pixabay.js";
 import { generateExampleVideos, generateVideo } from "../../services/veo.js";
@@ -17,6 +17,41 @@ import { loadConfig, renderTemplate, type AppConfig } from "../../services/confi
 const router = Router();
 const DATA_DIR = path.resolve("data/wordlists");
 const PUBLIC_DIR = path.resolve("public");
+const DEFAULT_TTS_SPEED = 1.25;
+const MIN_TTS_SPEED = 0.8;
+const MAX_TTS_SPEED = 1.6;
+
+function toPublicRel(...parts: string[]): string {
+  return path.posix.join(
+    ...parts
+      .filter((p) => !!p)
+      .map((p) => p.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "")),
+  );
+}
+
+function getWordAudioDir(listId: string, wordId: string): string {
+  return path.join(PUBLIC_DIR, "audio", listId, wordId);
+}
+
+function getWordImageDir(listId: string, wordId: string): string {
+  return path.join(PUBLIC_DIR, "images", listId, wordId);
+}
+
+function getListVideoDir(listId: string): string {
+  return path.join(PUBLIC_DIR, "videos", listId);
+}
+
+function audioRel(listId: string, wordId: string, fileName: string): string {
+  return toPublicRel("audio", listId, wordId, fileName);
+}
+
+function imageRel(listId: string, wordId: string, fileName: string): string {
+  return toPublicRel("images", listId, wordId, fileName);
+}
+
+function videoRel(listId: string, fileName: string): string {
+  return toPublicRel("videos", listId, fileName);
+}
 
 function loadList(listId: string): WordList | null {
   const file = path.join(DATA_DIR, `${listId}.json`);
@@ -58,6 +93,54 @@ function getEffectiveConfig(list: WordList): AppConfig {
       ...cleanPrompts,
     },
   };
+}
+
+function clampTtsSpeed(speed?: number): number {
+  if (!Number.isFinite(speed)) return DEFAULT_TTS_SPEED;
+  return Math.min(MAX_TTS_SPEED, Math.max(MIN_TTS_SPEED, Number(speed)));
+}
+
+function ensurePatternTtsSpeeds(existing: number[] | undefined, count: number): number[] {
+  const next = Array.from({ length: count }, (_, idx) =>
+    clampTtsSpeed(existing?.[idx]),
+  );
+  return next;
+}
+
+function ensureWordTtsSpeeds(word: WordEntry): void {
+  word.assets.chineseIntroTtsSpeed = clampTtsSpeed(
+    word.assets.chineseIntroTtsSpeed,
+  );
+  word.assets.chineseWordTtsSpeed = clampTtsSpeed(
+    word.assets.chineseWordTtsSpeed,
+  );
+  word.assets.englishTtsSpeed = clampTtsSpeed(word.assets.englishTtsSpeed);
+  word.assets.patternTtsSpeeds = ensurePatternTtsSpeeds(
+    word.assets.patternTtsSpeeds,
+    word.patterns.length,
+  );
+}
+
+async function generatePatternTtsAssets(params: {
+  listId: string;
+  wordId: string;
+  patterns: string[];
+  audioDir: string;
+  overrides?: TtsOverrides;
+}): Promise<{ paths: string[]; durations: number[] }> {
+  const { listId, wordId, patterns, audioDir, overrides } = params;
+  const paths: string[] = [];
+  const durations: number[] = [];
+
+  for (let i = 0; i < patterns.length; i++) {
+    const fileName = `pattern_${i}.wav`;
+    const outputPath = path.join(audioDir, fileName);
+    const result = await generateEnglishTts(patterns[i], outputPath, overrides);
+    paths.push(audioRel(listId, wordId, fileName));
+    durations.push(result.durationSec);
+  }
+
+  return { paths, durations };
 }
 
 // 生成单词内容 (Gemini Flash)
@@ -166,7 +249,7 @@ router.post("/tts/:listId/:wordId", async (req, res) => {
     const word = findWord(list, req.params.wordId);
     if (!word) return res.status(404).json({ success: false, error: "单词未找到" });
 
-    const audioDir = path.join(PUBLIC_DIR, "audio");
+    const audioDir = getWordAudioDir(list.id, word.id);
     const cfg = getEffectiveConfig(list);
     const ttsOverrides = {
       model: cfg.models.tts,
@@ -189,38 +272,41 @@ router.post("/tts/:listId/:wordId", async (req, res) => {
     const introStat = fs.statSync(introPath);
     const introSize = introStat.size - 44; // WAV header = 44 bytes
     const introDuration = introSize / (24000 * 2);
-    word.assets.chineseIntroTtsPath = "audio/chinese_intro.wav";
+    word.assets.chineseIntroTtsPath = audioRel(list.id, word.id, "chinese_intro.wav");
     word.assets.chineseIntroTtsDuration = introDuration;
 
     // 中文 TTS - 单词释义 (每词不同)
-    const wordChineseText = renderTemplate(cfg.prompts.chineseWordTemplate, { chineseMeaning: word.chineseMeaning });
+    // 第1幕中文语音改为只读“中文简明释义”，不再带冗长前缀
+    const wordChineseText = word.chineseMeaning;
     const chineseWord = await generateChineseTts(
       wordChineseText,
-      path.join(audioDir, `${word.id}_chinese_word.wav`),
+      path.join(audioDir, "chinese_word.wav"),
       ttsOverrides,
     );
-    word.assets.chineseWordTtsPath = `audio/${word.id}_chinese_word.wav`;
+    word.assets.chineseWordTtsPath = audioRel(list.id, word.id, "chinese_word.wav");
     word.assets.chineseWordTtsDuration = chineseWord.durationSec;
 
     // 英文 TTS
     const englishText = renderTemplate(cfg.prompts.englishWordTemplate, { word: word.word, englishMeaning: word.englishMeaning });
     const english = await generateEnglishTts(
       englishText,
-      path.join(audioDir, `${word.id}_english.wav`),
+      path.join(audioDir, "english.wav"),
       ttsOverrides,
     );
-    word.assets.englishTtsPath = `audio/${word.id}_english.wav`;
+    word.assets.englishTtsPath = audioRel(list.id, word.id, "english.wav");
     word.assets.englishTtsDuration = english.durationSec;
 
     // 句式 TTS
-    const patterns = await generatePatternsTts(
-      word.patterns,
+    const patterns = await generatePatternTtsAssets({
+      listId: list.id,
+      wordId: word.id,
+      patterns: word.patterns,
       audioDir,
-      word.id,
-      ttsOverrides,
-    );
+      overrides: ttsOverrides,
+    });
     word.assets.patternTtsPaths = patterns.paths;
     word.assets.patternTtsDurations = patterns.durations;
+    ensureWordTtsSpeeds(word);
 
     logCost("gemini-tts", "generateAllTts", 0.05, word.id);
     word.updatedAt = new Date().toISOString();
@@ -239,7 +325,7 @@ router.post("/tts-single/:listId/:wordId/:ttsType", async (req, res) => {
     const word = findWord(list, req.params.wordId);
     if (!word) return res.status(404).json({ success: false, error: "单词未找到" });
 
-    const audioDir = path.join(PUBLIC_DIR, "audio");
+    const audioDir = getWordAudioDir(list.id, word.id);
     const cfg = getEffectiveConfig(list);
     const ttsType = req.params.ttsType;
     const ttsOverrides = {
@@ -250,29 +336,32 @@ router.post("/tts-single/:listId/:wordId/:ttsType", async (req, res) => {
     };
 
     if (ttsType === "chinese_word") {
-      const text = renderTemplate(cfg.prompts.chineseWordTemplate, { chineseMeaning: word.chineseMeaning });
-      const r = await generateChineseTts(text, path.join(audioDir, `${word.id}_chinese_word.wav`), ttsOverrides);
-      word.assets.chineseWordTtsPath = `audio/${word.id}_chinese_word.wav`;
+      const text = word.chineseMeaning;
+      const r = await generateChineseTts(text, path.join(audioDir, "chinese_word.wav"), ttsOverrides);
+      word.assets.chineseWordTtsPath = audioRel(list.id, word.id, "chinese_word.wav");
       word.assets.chineseWordTtsDuration = r.durationSec;
     } else if (ttsType === "english") {
       const text = renderTemplate(cfg.prompts.englishWordTemplate, { word: word.word, englishMeaning: word.englishMeaning });
-      const r = await generateEnglishTts(text, path.join(audioDir, `${word.id}_english.wav`), ttsOverrides);
-      word.assets.englishTtsPath = `audio/${word.id}_english.wav`;
+      const r = await generateEnglishTts(text, path.join(audioDir, "english.wav"), ttsOverrides);
+      word.assets.englishTtsPath = audioRel(list.id, word.id, "english.wav");
       word.assets.englishTtsDuration = r.durationSec;
     } else if (ttsType.startsWith("pattern_")) {
       const idx = parseInt(ttsType.split("_")[1]);
       if (idx >= 0 && idx < word.patterns.length) {
-        const r = await generateEnglishTts(word.patterns[idx], path.join(audioDir, `${word.id}_pattern_${idx}.wav`), ttsOverrides);
+        const fileName = `pattern_${idx}.wav`;
+        const r = await generateEnglishTts(word.patterns[idx], path.join(audioDir, fileName), ttsOverrides);
         if (!word.assets.patternTtsPaths) word.assets.patternTtsPaths = [];
         if (!word.assets.patternTtsDurations) word.assets.patternTtsDurations = [];
-        word.assets.patternTtsPaths[idx] = `audio/${word.id}_pattern_${idx}.wav`;
+        word.assets.patternTtsPaths[idx] = audioRel(list.id, word.id, fileName);
         word.assets.patternTtsDurations[idx] = r.durationSec;
       }
     } else if (ttsType === "chinese_intro") {
       const r = await generateChineseTts(cfg.prompts.chineseIntro, path.join(audioDir, "chinese_intro.wav"), ttsOverrides);
-      word.assets.chineseIntroTtsPath = "audio/chinese_intro.wav";
+      word.assets.chineseIntroTtsPath = audioRel(list.id, word.id, "chinese_intro.wav");
       word.assets.chineseIntroTtsDuration = r.durationSec;
     }
+
+    ensureWordTtsSpeeds(word);
 
     logCost("gemini-tts", `regenerate_${ttsType}`, 0.01, word.id);
     word.updatedAt = new Date().toISOString();
@@ -292,7 +381,8 @@ router.post("/image/:listId/:wordId", async (req, res) => {
     const word = findWord(list, req.params.wordId);
     if (!word) return res.status(404).json({ success: false, error: "单词未找到" });
 
-    const outputPath = path.join(PUBLIC_DIR, "images", `${word.id}.jpg`);
+    const imageDir = getWordImageDir(list.id, word.id);
+    const outputPath = path.join(imageDir, "image.jpg");
     const result = await fetchAndSaveImage(
       word.word,
       outputPath,
@@ -300,7 +390,7 @@ router.post("/image/:listId/:wordId", async (req, res) => {
     );
 
     if (result) {
-      word.assets.imagePath = `images/${word.id}.jpg`;
+      word.assets.imagePath = imageRel(list.id, word.id, "image.jpg");
       word.updatedAt = new Date().toISOString();
       saveList(list);
     }
@@ -334,7 +424,7 @@ router.post("/video/:listId/:wordId", async (req, res) => {
     const word = findWord(list, req.params.wordId);
     if (!word) return res.status(404).json({ success: false, error: "单词未找到" });
 
-    const videoDir = path.join(PUBLIC_DIR, "videos");
+    const videoDir = getListVideoDir(list.id);
     const cfg = getEffectiveConfig(list);
     const result = await generateExampleVideos(
       word.word,
@@ -345,20 +435,53 @@ router.post("/video/:listId/:wordId", async (req, res) => {
         model: cfg.models.video,
         promptTemplate: cfg.prompts.veoVideo,
       },
+      path.posix.join("videos", list.id),
     );
 
     word.assets.exampleVideoPaths = result.paths;
     word.assets.exampleVideoDurations = result.durations;
+
+    let subtitleAutoRegenerated = false;
+    let subtitleAutoError: string | undefined;
+
+    try {
+      const subtitleData = [];
+      for (let i = 0; i < result.paths.length; i++) {
+        const videoPath = path.join(PUBLIC_DIR, result.paths[i]);
+        const segments = await generateSubtitles(
+          videoPath,
+          word.examples[i].english,
+          word.examples[i].chinese,
+          cfg.models.subtitle,
+        );
+        subtitleData.push(segments);
+      }
+      word.assets.subtitleData = subtitleData;
+      subtitleAutoRegenerated = true;
+      logCost("stt", "autoGenerateSubtitlesAfterVideoRegenerate", 0.004, word.id);
+    } catch (subtitleErr: any) {
+      subtitleAutoError = subtitleErr?.message || "字幕自动重生失败";
+      // 批量重生视频后若字幕自动同步失败，清空旧字幕避免整体时序错位
+      delete word.assets.subtitleData;
+    }
+
     logCost("veo", "generateExampleVideos", 2.4, word.id);
     word.updatedAt = new Date().toISOString();
     saveList(list);
-    res.json({ success: true, data: word });
+    res.json({
+      success: true,
+      data: word,
+      meta: {
+        subtitleAutoRegenerated,
+        subtitleAutoError,
+      },
+    });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// 重生成单条示例视频
+// 重生成单条示例视频（自动同步重生对应字幕）
 router.post("/video-single/:listId/:wordId/:exampleIndex", async (req, res) => {
   try {
     const { confirmed } = req.body;
@@ -387,8 +510,9 @@ router.post("/video-single/:listId/:wordId/:exampleIndex", async (req, res) => {
     }
 
     const cfg = getEffectiveConfig(list);
-    const videoDir = path.join(PUBLIC_DIR, "videos");
-    const outputPath = path.join(videoDir, `${word.id}_example_${exampleIndex}.mp4`);
+    const videoDir = getListVideoDir(list.id);
+    const outputFileName = `${word.id}_example_${exampleIndex}.mp4`;
+    const outputPath = path.join(videoDir, outputFileName);
     const result = await generateVideo(
       word.word,
       word.examples[exampleIndex].english,
@@ -401,13 +525,47 @@ router.post("/video-single/:listId/:wordId/:exampleIndex", async (req, res) => {
 
     if (!word.assets.exampleVideoPaths) word.assets.exampleVideoPaths = [];
     if (!word.assets.exampleVideoDurations) word.assets.exampleVideoDurations = [];
-    word.assets.exampleVideoPaths[exampleIndex] = `videos/${word.id}_example_${exampleIndex}.mp4`;
+    word.assets.exampleVideoPaths[exampleIndex] = videoRel(list.id, outputFileName);
     word.assets.exampleVideoDurations[exampleIndex] = result.durationSec;
+
+    let subtitleAutoRegenerated = false;
+    let subtitleAutoError: string | undefined;
+
+    try {
+      const refreshedVideoPath = path.join(
+        PUBLIC_DIR,
+        word.assets.exampleVideoPaths[exampleIndex],
+      );
+      const segments = await generateSubtitles(
+        refreshedVideoPath,
+        word.examples[exampleIndex].english,
+        word.examples[exampleIndex].chinese,
+        cfg.models.subtitle,
+      );
+      if (!word.assets.subtitleData) word.assets.subtitleData = [];
+      word.assets.subtitleData[exampleIndex] = segments;
+      subtitleAutoRegenerated = true;
+      logCost("stt", `autoGenerateSubtitleAfterVideoRegenerate_${exampleIndex}`, 0.002, word.id);
+    } catch (subtitleErr: any) {
+      subtitleAutoError = subtitleErr?.message || "字幕自动重生失败";
+      // 自动字幕失败时删除旧字幕，避免沿用过期时间戳导致错位
+      if (word.assets.subtitleData?.[exampleIndex]) {
+        delete word.assets.subtitleData[exampleIndex];
+      }
+    }
+
     word.updatedAt = new Date().toISOString();
     saveList(list);
 
     logCost("veo", `generateSingleExampleVideo_${exampleIndex}`, 1.2, word.id);
-    res.json({ success: true, data: word });
+    res.json({
+      success: true,
+      data: word,
+      meta: {
+        subtitleAutoRegenerated,
+        subtitleAutoError,
+      },
+    });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -513,40 +671,48 @@ router.post("/pipeline/:listId/:wordId", async (req, res) => {
     }
 
     // Step 2: TTS
-    const audioDir = path.join(PUBLIC_DIR, "audio");
+    const audioDir = getWordAudioDir(list.id, word.id);
     const ttsOverrides = {
       model: cfg.models.tts,
       voiceName: cfg.models.ttsVoice,
       englishVoicePrompt: cfg.prompts.englishVoice,
       chineseVoicePrompt: cfg.prompts.chineseVoice,
     };
-    const chineseText = renderTemplate(cfg.prompts.chineseWordTemplate, { chineseMeaning: word.chineseMeaning });
+    const chineseText = word.chineseMeaning;
     const chinese = await generateChineseTts(
       chineseText,
-      path.join(audioDir, `${word.id}_chinese.wav`),
+      path.join(audioDir, "chinese.wav"),
       ttsOverrides,
     );
-    word.assets.chineseTtsPath = `audio/${word.id}_chinese.wav`;
+    word.assets.chineseTtsPath = audioRel(list.id, word.id, "chinese.wav");
     word.assets.chineseTtsDuration = chinese.durationSec;
 
     const englishText = renderTemplate(cfg.prompts.englishWordTemplate, { word: word.word, englishMeaning: word.englishMeaning });
     const english = await generateEnglishTts(
       englishText,
-      path.join(audioDir, `${word.id}_english.wav`),
+      path.join(audioDir, "english.wav"),
       ttsOverrides,
     );
-    word.assets.englishTtsPath = `audio/${word.id}_english.wav`;
+    word.assets.englishTtsPath = audioRel(list.id, word.id, "english.wav");
     word.assets.englishTtsDuration = english.durationSec;
 
-    const patterns = await generatePatternsTts(word.patterns, audioDir, word.id, ttsOverrides);
+    const patterns = await generatePatternTtsAssets({
+      listId: list.id,
+      wordId: word.id,
+      patterns: word.patterns,
+      audioDir,
+      overrides: ttsOverrides,
+    });
     word.assets.patternTtsPaths = patterns.paths;
     word.assets.patternTtsDurations = patterns.durations;
+    ensureWordTtsSpeeds(word);
     logCost("gemini-tts", "generateAllTts", 0.05, word.id);
 
     // Step 3: 图片
-    const outputPath = path.join(PUBLIC_DIR, "images", `${word.id}.jpg`);
+    const imageDir = getWordImageDir(list.id, word.id);
+    const outputPath = path.join(imageDir, "image.jpg");
     const imgResult = await fetchAndSaveImage(word.word, outputPath, "african american expression");
-    if (imgResult) word.assets.imagePath = `images/${word.id}.jpg`;
+    if (imgResult) word.assets.imagePath = imageRel(list.id, word.id, "image.jpg");
 
     word.status = "assets_ready";
     word.updatedAt = new Date().toISOString();

@@ -10,11 +10,16 @@ import {
 } from "remotion";
 import type { WestCoastWordProps } from "../../types/index";
 import { WheelPicker, FlashEffect, WHEEL_ANIM_FRAMES } from "./WheelPicker";
+import {
+  getScene1Timing,
+  normalizeTtsSpeed,
+  SCENE1_WORD_INFO_DELAY_FRAMES,
+} from "./calculateMetadata";
 
 const WHEEL_ITEMS = [
-  "高考", "四级", "六级", "考研", "雅思", "托福", "GRE", "西海岸",
+  "四级", "高考", "考研", "雅思", "", "西海岸",
 ];
-const TARGET_INDEX = 7;
+const TARGET_INDEX = 5;
 const TARGET_COLOR = "#F5A623";
 
 export const Scene1Title: React.FC<WestCoastWordProps> = ({
@@ -23,8 +28,15 @@ export const Scene1Title: React.FC<WestCoastWordProps> = ({
 }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
+  const scene1Timing = getScene1Timing(word, fps);
 
   const flashFrame = WHEEL_ANIM_FRAMES;
+  const bgBrightness = interpolate(
+    frame,
+    [0, flashFrame, flashFrame + 24],
+    [0.28, 0.28, 0.4],
+    { extrapolateRight: "clamp" },
+  );
 
   // 背景视频淡入
   const bgOpacity = interpolate(frame, [0, 20], [0, 1], {
@@ -32,7 +44,7 @@ export const Scene1Title: React.FC<WestCoastWordProps> = ({
   });
 
   // 单词信息淡入 (闪光后)
-  const wordInfoDelay = flashFrame + 25;
+  const wordInfoDelay = flashFrame + SCENE1_WORD_INFO_DELAY_FRAMES;
   const wordInfoOpacity = interpolate(
     frame,
     [wordInfoDelay, wordInfoDelay + 15],
@@ -48,24 +60,10 @@ export const Scene1Title: React.FC<WestCoastWordProps> = ({
 
   return (
     <AbsoluteFill>
-      {/* 闪光前：暗灰色背景 */}
+      {/* 背景视频：从开场即播放 */}
       <AbsoluteFill
         style={{
-          backgroundColor: "#1a1a1f",
-          opacity: frame < flashFrame ? 1 : interpolate(
-            frame, [flashFrame, flashFrame + 30], [1, 0],
-            { extrapolateRight: "clamp" },
-          ),
-        }}
-      />
-
-      {/* 闪光后：背景视频淡入 */}
-      <AbsoluteFill
-        style={{
-          opacity: frame < flashFrame ? 0 : interpolate(
-            frame, [flashFrame, flashFrame + 30], [0, 1],
-            { extrapolateRight: "clamp" },
-          ),
+          opacity: 1,
         }}
       >
         <OffthreadVideo
@@ -74,7 +72,7 @@ export const Scene1Title: React.FC<WestCoastWordProps> = ({
             width: "100%",
             height: "100%",
             objectFit: "cover",
-            filter: "blur(10px) brightness(0.4)",
+            filter: `blur(10px) brightness(${bgBrightness})`,
           }}
           muted
         />
@@ -190,40 +188,27 @@ export const Scene1Title: React.FC<WestCoastWordProps> = ({
         </div>
       </div>
 
-      {/* 中文 TTS - 开场白 (固定复用) */}
-      {word.assets.chineseIntroTtsPath && (
-        <Sequence from={0}>
-          <Audio src={staticFile(word.assets.chineseIntroTtsPath)} volume={1} />
-        </Sequence>
-      )}
-      {/* 中文 TTS - 单词释义 (每词不同) */}
-      {word.assets.chineseWordTtsPath && (
-        <Sequence
-          from={Math.ceil(
-            ((word.assets.chineseIntroTtsDuration || 3) + 0.2) * fps,
-          )}
-        >
-          <Audio src={staticFile(word.assets.chineseWordTtsPath)} volume={1} />
-        </Sequence>
-      )}
-
-      {/* 兼容旧格式: 单条中文 TTS */}
-      {!word.assets.chineseIntroTtsPath && word.assets.chineseTtsPath && (
-        <Sequence from={0}>
-          <Audio src={staticFile(word.assets.chineseTtsPath)} volume={1} />
-        </Sequence>
-      )}
-
-      {/* 英文 TTS - 中文TTS结束后播放 */}
+      {/* 英文 TTS：闪光后等待 0.1s 再播报 */}
       {word.assets.englishTtsPath && (
         <Sequence
-          from={Math.ceil(
-            ((word.assets.chineseIntroTtsDuration || 0) +
-              (word.assets.chineseWordTtsDuration || word.assets.chineseTtsDuration || 4) +
-              0.5) * fps,
-          )}
+          from={Math.ceil(scene1Timing.englishStartSec * fps)}
         >
-          <Audio src={staticFile(word.assets.englishTtsPath)} volume={1} />
+          <Audio
+            src={staticFile(word.assets.englishTtsPath)}
+            volume={1}
+            playbackRate={normalizeTtsSpeed(word.assets.englishTtsSpeed)}
+          />
+        </Sequence>
+      )}
+
+      {/* 中文 TTS：英文后停顿 0.3s 再播“中文简明释义” */}
+      {(word.assets.chineseWordTtsPath || word.assets.chineseTtsPath) && (
+        <Sequence from={Math.ceil(scene1Timing.chineseStartSec * fps)}>
+          <Audio
+            src={staticFile(word.assets.chineseWordTtsPath || word.assets.chineseTtsPath!)}
+            volume={1}
+            playbackRate={normalizeTtsSpeed(word.assets.chineseWordTtsSpeed)}
+          />
         </Sequence>
       )}
     </AbsoluteFill>

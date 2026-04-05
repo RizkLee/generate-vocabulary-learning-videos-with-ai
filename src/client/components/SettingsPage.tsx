@@ -137,6 +137,9 @@ export const SettingsPage: React.FC<Props> = ({ selectedList }) => {
         prompts: Object.fromEntries(
           Object.entries(listConfig.prompts || {}).filter(([, v]) => (v || "").trim()),
         ),
+        cover: Object.fromEntries(
+          Object.entries(listConfig.cover || {}).filter(([, v]) => (v || "").trim()),
+        ),
       };
       const res = await fetch(`/api/wordlists/${selectedList.id}`, {
         method: "PUT",
@@ -319,6 +322,43 @@ export const SettingsPage: React.FC<Props> = ({ selectedList }) => {
             <SettingsTextArea label="中文开场白" path="prompts.chineseIntro" value={listConfig.prompts?.chineseIntro || ""} rows={2} onSet={(p, v) => setList(p, String(v))} placeholder={globalConfig.prompts.chineseIntro} />
             <SettingsTextArea label="中文单词模板" path="prompts.chineseWordTemplate" value={listConfig.prompts?.chineseWordTemplate || ""} rows={2} onSet={(p, v) => setList(p, String(v))} placeholder={globalConfig.prompts.chineseWordTemplate} />
             <SettingsTextArea label="英文单词模板" path="prompts.englishWordTemplate" value={listConfig.prompts?.englishWordTemplate || ""} rows={2} onSet={(p, v) => setList(p, String(v))} placeholder={globalConfig.prompts.englishWordTemplate} />
+          </div>
+
+          <div style={S.section}>
+            <h3 style={S.sTitle}>词库封面配置</h3>
+            <div style={S.tip}>用于渲染完成后自动生成 4:3 与 16:9 封面。路径留空时默认使用 `Material/video-cover.png`（自动复制到 `public/images/video-cover.png`）。</div>
+            <SettingsField
+              label="封面背景图路径"
+              path="cover.backgroundImagePath"
+              value={listConfig.cover?.backgroundImagePath || ""}
+              onSet={(p, v) => setList(p, String(v))}
+            />
+            <div style={S.grid2}>
+              <SettingsField
+                label="标题前缀"
+                path="cover.titlePrefix"
+                value={listConfig.cover?.titlePrefix || ""}
+                onSet={(p, v) => setList(p, String(v))}
+              />
+              <SettingsField
+                label="标题高亮词"
+                path="cover.titleHighlight"
+                value={listConfig.cover?.titleHighlight || ""}
+                onSet={(p, v) => setList(p, String(v))}
+              />
+              <SettingsField
+                label="标题后缀"
+                path="cover.titleSuffix"
+                value={listConfig.cover?.titleSuffix || ""}
+                onSet={(p, v) => setList(p, String(v))}
+              />
+              <SettingsField
+                label="高亮颜色（如 #F5A623）"
+                path="cover.highlightColor"
+                value={listConfig.cover?.highlightColor || ""}
+                onSet={(p, v) => setList(p, String(v))}
+              />
+            </div>
           </div>
         </>
       )}

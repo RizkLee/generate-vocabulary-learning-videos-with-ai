@@ -16,14 +16,12 @@ export const WestCoastWordVideo: React.FC<WestCoastWordProps> = (props) => {
         fontFamily: "'Noto Serif SC', 'Noto Sans SC', serif",
       }}
     >
-      {/* BGM - 贯穿全片 */}
+      {/* BGM - 从第0帧起播，无淡入 */}
       <Audio
         src={staticFile(bgmSrc)}
         volume={(f) => {
           // 第3幕降低 BGM 音量
           if (f >= scenes.scene3.from) return 0.12;
-          // 开头渐入
-          if (f < 15) return (f / 15) * 0.35;
           return 0.35;
         }}
         loop
