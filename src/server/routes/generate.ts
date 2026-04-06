@@ -13,6 +13,11 @@ import { generateExampleVideos, generateVideo } from "../../services/veo.js";
 import { generateSubtitles } from "../../services/subtitle.js";
 import { logCost, checkBudget, getCostSummary } from "../../services/cost-tracker.js";
 import { loadConfig, renderTemplate, type AppConfig } from "../../services/config.js";
+import {
+  ensureScene4OutroTts,
+  getScene4OutroRelPath,
+  normalizeScene4OutroTtsSpeed,
+} from "../../services/scene4-outro.js";
 
 const router = Router();
 const DATA_DIR = path.resolve("data/wordlists");
@@ -20,6 +25,8 @@ const PUBLIC_DIR = path.resolve("public");
 const DEFAULT_TTS_SPEED = 1.25;
 const MIN_TTS_SPEED = 0.8;
 const MAX_TTS_SPEED = 1.6;
+const MIN_AI_VIDEO_COUNT = 0;
+const MAX_AI_VIDEO_COUNT = 2;
 
 function toPublicRel(...parts: string[]): string {
   return path.posix.join(
@@ -68,6 +75,19 @@ function saveList(list: WordList): void {
 
 function findWord(list: WordList, wordId: string): WordEntry | undefined {
   return list.words.find((w) => w.id === wordId);
+}
+
+function normalizeWordKey(word?: string): string {
+  return (word || "").trim().toLowerCase();
+}
+
+function normalizeAiVideoCount(value: unknown, fallback = 2): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(
+    MAX_AI_VIDEO_COUNT,
+    Math.max(MIN_AI_VIDEO_COUNT, Math.floor(parsed)),
+  );
 }
 
 function getEffectiveConfig(list: WordList): AppConfig {
@@ -230,10 +250,48 @@ router.post("/content-partial/:listId/:wordId", async (req, res) => {
 // AI 批量生成单词列表
 router.post("/wordlist", async (req, res) => {
   try {
-    const { theme, count } = req.body;
-    const words = await generateWordList(theme, count || 10);
+    const { theme, count, listId } = req.body;
+    const requestedCount = Math.max(1, Number(count) || 10);
+
+    let existingWords: string[] = [];
+    if (typeof listId === "string" && listId.trim()) {
+      const list = loadList(listId);
+      if (list) {
+        existingWords = list.words
+          .map((w) => (w.word || "").trim())
+          .filter(Boolean)
+          .slice(0, 300);
+      }
+    }
+
+    const generatedWords = await generateWordList(theme, requestedCount, {
+      avoidWords: existingWords,
+    });
+
+    // 生成后做二次检查：若与当前单词本重合则丢弃（等价于删除生成冲突词）
+    const existingSet = new Set(existingWords.map(normalizeWordKey));
+    const batchSet = new Set<string>();
+    const words = generatedWords.filter((w) => {
+      const key = normalizeWordKey(w.word);
+      if (!key) return false;
+      if (existingSet.has(key)) return false;
+      if (batchSet.has(key)) return false;
+      batchSet.add(key);
+      return true;
+    });
+
+    const removedCount = generatedWords.length - words.length;
     logCost("gemini-flash", "generateWordList", 0.005, "batch");
-    res.json({ success: true, data: words });
+    res.json({
+      success: true,
+      data: words,
+      meta: {
+        requestedCount,
+        generatedCount: generatedWords.length,
+        returnedCount: words.length,
+        removedDuplicateCount: removedCount,
+      },
+    });
   } catch (err: any) {
     const msg = err.cause?.message ? `${err.message} (${err.cause.message})` : err.message;
     res.status(500).json({ success: false, error: msg });
@@ -257,6 +315,18 @@ router.post("/tts/:listId/:wordId", async (req, res) => {
       englishVoicePrompt: cfg.prompts.englishVoice,
       chineseVoicePrompt: cfg.prompts.chineseVoice,
     };
+
+    const scene4OutroPath = getScene4OutroRelPath(
+      list.id,
+      list.config?.media?.scene4OutroTtsPath,
+    );
+    const sharedScene4Outro = await ensureScene4OutroTts(PUBLIC_DIR, {
+      relativePath: scene4OutroPath,
+      overrides: ttsOverrides,
+    });
+    if (sharedScene4Outro.generated) {
+      logCost("gemini-tts", "generateSharedScene4Outro", 0.01, "shared-scene4");
+    }
 
     // 中文 TTS - 开场白 (固定复用，只生成一次)
     const introPath = path.join(audioDir, "chinese_intro.wav");
@@ -312,6 +382,55 @@ router.post("/tts/:listId/:wordId", async (req, res) => {
     word.updatedAt = new Date().toISOString();
     saveList(list);
     res.json({ success: true, data: word });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 重新生成第4幕公共 TTS（词本级）
+router.post("/scene4-outro-tts/:listId", async (req, res) => {
+  try {
+    const list = loadList(req.params.listId);
+    if (!list) return res.status(404).json({ success: false, error: "未找到" });
+
+    const cfg = getEffectiveConfig(list);
+    const ttsOverrides = {
+      model: cfg.models.tts,
+      voiceName: cfg.models.ttsVoice,
+      englishVoicePrompt: cfg.prompts.englishVoice,
+      chineseVoicePrompt: cfg.prompts.chineseVoice,
+    };
+
+    const speed = normalizeScene4OutroTtsSpeed(
+      req.body?.speed ?? list.config?.media?.scene4OutroTtsSpeed,
+    );
+    const scene4OutroPath = getScene4OutroRelPath(
+      list.id,
+      list.config?.media?.scene4OutroTtsPath,
+    );
+
+    const regenerated = await ensureScene4OutroTts(PUBLIC_DIR, {
+      relativePath: scene4OutroPath,
+      overrides: ttsOverrides,
+      forceRegenerate: true,
+    });
+
+    list.config = list.config || {};
+    list.config.media = list.config.media || {};
+    list.config.media.scene4OutroTtsPath = regenerated.relativePath;
+    list.config.media.scene4OutroTtsSpeed = speed;
+    list.updatedAt = new Date().toISOString();
+    saveList(list);
+
+    logCost("gemini-tts", "regenerateScene4OutroTts", 0.01, "shared-scene4");
+    res.json({
+      success: true,
+      data: {
+        path: regenerated.relativePath,
+        durationSec: regenerated.durationSec,
+        speed,
+      },
+    });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -405,18 +524,7 @@ router.post("/image/:listId/:wordId", async (req, res) => {
 router.post("/video/:listId/:wordId", async (req, res) => {
   try {
     const { confirmed } = req.body;
-    if (!confirmed) {
-      const budget = checkBudget(2.4);
-      return res.json({
-        success: false,
-        error: "需要确认",
-        data: {
-          estimatedCost: 2.4,
-          budgetRemaining: budget.remaining,
-          budgetOk: budget.ok,
-        },
-      });
-    }
+    const requestedVideoCount = normalizeAiVideoCount(req.body?.videoCount, 2);
 
     const list = loadList(req.params.listId);
     if (!list) return res.status(404).json({ success: false, error: "未找到" });
@@ -424,11 +532,49 @@ router.post("/video/:listId/:wordId", async (req, res) => {
     const word = findWord(list, req.params.wordId);
     if (!word) return res.status(404).json({ success: false, error: "单词未找到" });
 
+    const targetVideoCount = Math.min(requestedVideoCount, word.examples.length);
+    const estimatedCost = Number((targetVideoCount * 1.2).toFixed(3));
+
+    if (!confirmed && estimatedCost > 0) {
+      const budget = checkBudget(estimatedCost);
+      return res.json({
+        success: false,
+        error: "需要确认",
+        data: {
+          requestedVideoCount,
+          targetVideoCount,
+          estimatedCost,
+          budgetRemaining: budget.remaining,
+          budgetOk: budget.ok,
+        },
+      });
+    }
+
+    if (targetVideoCount === 0) {
+      word.assets.exampleVideoPaths = [];
+      word.assets.exampleVideoDurations = [];
+      word.assets.subtitleData = [];
+      word.updatedAt = new Date().toISOString();
+      saveList(list);
+      return res.json({
+        success: true,
+        data: word,
+        meta: {
+          requestedVideoCount,
+          generatedVideoCount: 0,
+          subtitleAutoRegenerated: true,
+          subtitleAutoError: undefined,
+          skippedScene3: true,
+        },
+      });
+    }
+
     const videoDir = getListVideoDir(list.id);
     const cfg = getEffectiveConfig(list);
+    const targetExamples = word.examples.slice(0, targetVideoCount);
     const result = await generateExampleVideos(
       word.word,
-      word.examples,
+      targetExamples,
       videoDir,
       word.id,
       {
@@ -450,8 +596,8 @@ router.post("/video/:listId/:wordId", async (req, res) => {
         const videoPath = path.join(PUBLIC_DIR, result.paths[i]);
         const segments = await generateSubtitles(
           videoPath,
-          word.examples[i].english,
-          word.examples[i].chinese,
+          targetExamples[i].english,
+          targetExamples[i].chinese,
           cfg.models.subtitle,
         );
         subtitleData.push(segments);
@@ -465,13 +611,16 @@ router.post("/video/:listId/:wordId", async (req, res) => {
       delete word.assets.subtitleData;
     }
 
-    logCost("veo", "generateExampleVideos", 2.4, word.id);
+    logCost("veo", "generateExampleVideos", estimatedCost, word.id);
     word.updatedAt = new Date().toISOString();
     saveList(list);
     res.json({
       success: true,
       data: word,
       meta: {
+        requestedVideoCount,
+        generatedVideoCount: result.paths.length,
+        estimatedCost,
         subtitleAutoRegenerated,
         subtitleAutoError,
       },
@@ -678,6 +827,19 @@ router.post("/pipeline/:listId/:wordId", async (req, res) => {
       englishVoicePrompt: cfg.prompts.englishVoice,
       chineseVoicePrompt: cfg.prompts.chineseVoice,
     };
+
+    const scene4OutroPath = getScene4OutroRelPath(
+      list.id,
+      list.config?.media?.scene4OutroTtsPath,
+    );
+    const sharedScene4Outro = await ensureScene4OutroTts(PUBLIC_DIR, {
+      relativePath: scene4OutroPath,
+      overrides: ttsOverrides,
+    });
+    if (sharedScene4Outro.generated) {
+      logCost("gemini-tts", "generateSharedScene4Outro", 0.01, "shared-scene4");
+    }
+
     const chineseText = word.chineseMeaning;
     const chinese = await generateChineseTts(
       chineseText,

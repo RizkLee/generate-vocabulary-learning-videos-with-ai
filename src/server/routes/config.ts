@@ -25,4 +25,19 @@ router.put("/", (req, res) => {
   }
 });
 
+router.put("/budget", (req, res) => {
+  try {
+    const budget = Number(req.body?.budget);
+    if (!Number.isFinite(budget) || budget < 0) {
+      return res.status(400).json({ success: false, error: "预算必须是大于等于0的数字" });
+    }
+
+    const config = loadConfig();
+    saveConfig({ ...config, budget });
+    res.json({ success: true, data: { budget } });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 export default router;

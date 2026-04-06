@@ -4,10 +4,17 @@ import { getSceneFrames } from "./calculateMetadata";
 import { Scene1Title } from "./Scene1Title";
 import { Scene2Patterns } from "./Scene2Patterns";
 import { Scene3Examples } from "./Scene3Examples";
+import { Scene4Outro } from "./Scene4Outro";
 
 export const WestCoastWordVideo: React.FC<WestCoastWordProps> = (props) => {
-  const { word, bgmSrc, fps } = props;
-  const scenes = getSceneFrames(word, fps);
+  const { word, bgmSrc, fps, previewMode } = props;
+  const scenes = getSceneFrames(
+    word,
+    fps,
+    previewMode,
+    props.scene4OutroTtsDuration,
+    props.scene4OutroTtsSpeed,
+  );
 
   return (
     <AbsoluteFill
@@ -21,7 +28,7 @@ export const WestCoastWordVideo: React.FC<WestCoastWordProps> = (props) => {
         src={staticFile(bgmSrc)}
         volume={(f) => {
           // 第3幕降低 BGM 音量
-          if (f >= scenes.scene3.from) return 0.12;
+          if (scenes.hasScene3 && f >= scenes.scene3.from) return 0.12;
           return 0.35;
         }}
         loop
@@ -44,11 +51,21 @@ export const WestCoastWordVideo: React.FC<WestCoastWordProps> = (props) => {
       </Sequence>
 
       {/* 第3幕: 例句视频 */}
+      {scenes.scene3.duration > 0 && (
+        <Sequence
+          from={scenes.scene3.from}
+          durationInFrames={scenes.scene3.duration}
+        >
+          <Scene3Examples {...props} sceneFrames={scenes} />
+        </Sequence>
+      )}
+
+      {/* 第4幕: 评论区引导 + 上期封面 */}
       <Sequence
-        from={scenes.scene3.from}
-        durationInFrames={scenes.scene3.duration}
+        from={scenes.scene4.from}
+        durationInFrames={scenes.scene4.duration}
       >
-        <Scene3Examples {...props} sceneFrames={scenes} />
+        <Scene4Outro {...props} sceneFrames={scenes} />
       </Sequence>
     </AbsoluteFill>
   );

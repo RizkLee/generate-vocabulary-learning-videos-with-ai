@@ -6,14 +6,16 @@ import {
   Settings,
   Plus,
   DollarSign,
+  ReceiptText,
 } from "lucide-react";
 import { WordListPage } from "./components/WordListPage";
 import { GeneratePage } from "./components/GeneratePage";
 import { AssetsPage } from "./components/AssetsPage";
 import { SettingsPage } from "./components/SettingsPage";
+import { BillingPage } from "./components/BillingPage";
 import type { WordList, CostSummary } from "../types/index";
 
-type Page = "wordlists" | "generate" | "assets" | "settings";
+type Page = "wordlists" | "generate" | "assets" | "billing" | "settings";
 
 export const App: React.FC = () => {
   const [page, setPage] = useState<Page>("wordlists");
@@ -50,6 +52,7 @@ export const App: React.FC = () => {
     { key: "wordlists", label: "词库", icon: <BookOpen size={18} /> },
     { key: "generate", label: "生成视频", icon: <Video size={18} /> },
     { key: "assets", label: "素材", icon: <FolderOpen size={18} /> },
+    { key: "billing", label: "Billing", icon: <ReceiptText size={18} /> },
     { key: "settings", label: "设置", icon: <Settings size={18} /> },
   ];
 
@@ -140,7 +143,7 @@ export const App: React.FC = () => {
           {page === "assets" && selectedList && (
             <AssetsPage
               wordList={selectedList}
-              onRefresh={() => fetchList(selectedList.id)}
+              onRefresh={() => { fetchList(selectedList.id); fetchCost(); }}
             />
           )}
           {page === "assets" && !selectedList && (
@@ -152,6 +155,9 @@ export const App: React.FC = () => {
           )}
           {page === "settings" && (
             <SettingsPage selectedList={selectedList} />
+          )}
+          {page === "billing" && (
+            <BillingPage onBudgetUpdated={fetchCost} />
           )}
         </div>
       </main>

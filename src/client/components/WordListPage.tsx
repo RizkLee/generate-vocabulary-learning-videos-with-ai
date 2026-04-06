@@ -1,5 +1,5 @@
-import React, { useState } from "react";
-import { Plus, Sparkles, ChevronRight, Loader2 } from "lucide-react";
+import React, { useEffect, useState } from "react";
+import { Plus, Sparkles, ChevronRight, Loader2, Trash2 } from "lucide-react";
 import type { WordList } from "../../types/index";
 
 interface Props {
@@ -31,6 +31,26 @@ export const WordListPage: React.FC<Props> = ({
   const [aiCount, setAiCount] = useState(5);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiMsg, setAiMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [selectedWordIds, setSelectedWordIds] = useState<string[]>([]);
+  const [deletingWords, setDeletingWords] = useState(false);
+
+  useEffect(() => {
+    if (!selectedList) {
+      setSelectedWordIds([]);
+      return;
+    }
+
+    const currentIds = new Set(selectedList.words.map((w) => w.id));
+    setSelectedWordIds((prev) => prev.filter((id) => currentIds.has(id)));
+  }, [selectedList?.id, selectedList?.updatedAt]);
+
+  const selectedWordCount = selectedList
+    ? selectedList.words.filter((w) => selectedWordIds.includes(w.id)).length
+    : 0;
+  const allWordsSelected =
+    !!selectedList &&
+    selectedList.words.length > 0 &&
+    selectedWordCount === selectedList.words.length;
 
   const createList = async () => {
     if (!newName.trim()) return;
@@ -46,13 +66,87 @@ export const WordListPage: React.FC<Props> = ({
 
   const addWord = async () => {
     if (!selectedList || !newWord.trim()) return;
-    await fetch(`/api/wordlists/${selectedList.id}/words`, {
+    const res = await fetch(`/api/wordlists/${selectedList.id}/words`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ word: newWord }),
     });
-    setNewWord("");
-    onSelectList(selectedList.id);
+    const data = await res.json();
+    if (data.success) {
+      setNewWord("");
+      onSelectList(selectedList.id);
+      setAiMsg({ ok: true, text: "已添加 1 个单词" });
+    } else {
+      setAiMsg({ ok: false, text: data.error || "添加失败" });
+    }
+  };
+
+  const toggleWordSelection = (wordId: string) => {
+    setSelectedWordIds((prev) =>
+      prev.includes(wordId)
+        ? prev.filter((id) => id !== wordId)
+        : [...prev, wordId],
+    );
+  };
+
+  const toggleSelectAllWords = () => {
+    if (!selectedList) return;
+    if (allWordsSelected) {
+      setSelectedWordIds([]);
+      return;
+    }
+    setSelectedWordIds(selectedList.words.map((w) => w.id));
+  };
+
+  const deleteOneWord = async (wordId: string) => {
+    if (!selectedList || deletingWords) return;
+    if (!window.confirm("确认删除这个单词吗？")) return;
+
+    setDeletingWords(true);
+    try {
+      const res = await fetch(`/api/wordlists/${selectedList.id}/words/${wordId}`, {
+        method: "DELETE",
+      });
+      const data = await res.json();
+      if (data.success) {
+        setSelectedWordIds((prev) => prev.filter((id) => id !== wordId));
+        onSelectList(selectedList.id);
+        setAiMsg({ ok: true, text: "已删除 1 个单词" });
+      } else {
+        setAiMsg({ ok: false, text: data.error || "删除失败" });
+      }
+    } catch (e: any) {
+      setAiMsg({ ok: false, text: e.message || "删除失败" });
+    } finally {
+      setDeletingWords(false);
+    }
+  };
+
+  const deleteSelectedWords = async () => {
+    if (!selectedList || selectedWordCount === 0 || deletingWords) return;
+    if (!window.confirm(`确认批量删除 ${selectedWordCount} 个单词吗？`)) return;
+
+    setDeletingWords(true);
+    try {
+      const res = await fetch(`/api/wordlists/${selectedList.id}/words/batch-delete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ wordIds: selectedWordIds }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        const deletedCount = data.data?.deletedCount || 0;
+        setSelectedWordIds([]);
+        onSelectList(selectedList.id);
+        setAiMsg({ ok: true, text: `已批量删除 ${deletedCount} 个单词` });
+      } else {
+        setAiMsg({ ok: false, text: data.error || "批量删除失败" });
+      }
+    } catch (e: any) {
+      setAiMsg({ ok: false, text: e.message || "批量删除失败" });
+    } finally {
+      setDeletingWords(false);
+    }
   };
 
   const aiGenerate = async () => {
@@ -63,21 +157,55 @@ export const WordListPage: React.FC<Props> = ({
       const res = await fetch("/api/generate/wordlist", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ theme: selectedList.theme || "西海岸常用俚语", count: aiCount }),
+        body: JSON.stringify({
+          theme: selectedList.theme || "西海岸常用俚语",
+          count: aiCount,
+          listId: selectedList.id,
+        }),
       });
       const data = await res.json();
-      if (data.success && data.data) {
-        let added = 0;
-        for (const w of data.data) {
-          const r = await fetch(`/api/wordlists/${selectedList.id}/words`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ ...w, patternTranslations: w.patternTranslations || [], status: "content_ready" }),
-          });
-          if ((await r.json()).success) added++;
+      if (data.success && Array.isArray(data.data)) {
+        const wordsToAdd = data.data.map((w: any) => ({
+          ...w,
+          patternTranslations: w.patternTranslations || [],
+          status: "content_ready",
+        }));
+
+        if (wordsToAdd.length === 0) {
+          const removedDuplicateCount = data.meta?.removedDuplicateCount || 0;
+          if (removedDuplicateCount > 0) {
+            setAiMsg({ ok: true, text: `未新增词条：生成结果与已有词重复（过滤 ${removedDuplicateCount} 个）` });
+          } else {
+            setAiMsg({ ok: true, text: "未新增词条：AI 未返回可用结果" });
+          }
+          return;
         }
-        onSelectList(selectedList.id);
-        setAiMsg({ ok: true, text: `已添加 ${added} 个单词` });
+
+        const addRes = await fetch(`/api/wordlists/${selectedList.id}/words/batch-add`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ words: wordsToAdd }),
+        });
+        const addData = await addRes.json();
+
+        if (addData.success) {
+          const added = addData.data?.addedCount || 0;
+          const skipped = addData.data?.skippedCount || 0;
+          const removedDuplicateCount = data.meta?.removedDuplicateCount || 0;
+
+          const msgParts = [`已添加 ${added} 个单词`];
+          if (removedDuplicateCount > 0) {
+            msgParts.push(`生成阶段过滤重复 ${removedDuplicateCount} 个`);
+          }
+          if (skipped > 0) {
+            msgParts.push(`入库阶段跳过重复 ${skipped} 个`);
+          }
+
+          onSelectList(selectedList.id);
+          setAiMsg({ ok: true, text: msgParts.join("，") });
+        } else {
+          setAiMsg({ ok: false, text: addData.error || "批量添加失败" });
+        }
       } else {
         setAiMsg({ ok: false, text: data.error || "生成失败" });
       }
@@ -187,6 +315,18 @@ export const WordListPage: React.FC<Props> = ({
               </button>
             </div>
             <div style={S.actionGroup}>
+              <button
+                onClick={deleteSelectedWords}
+                disabled={selectedWordCount === 0 || deletingWords}
+                style={{
+                  ...S.dangerOutlineBtn,
+                  opacity: selectedWordCount === 0 || deletingWords ? 0.5 : 1,
+                  cursor: selectedWordCount === 0 || deletingWords ? "not-allowed" : "pointer",
+                }}
+              >
+                <Trash2 size={14} />
+                {deletingWords ? "删除中..." : `批量删除 (${selectedWordCount})`}
+              </button>
               <input
                 value={newWord}
                 onChange={(e) => setNewWord(e.target.value)}
@@ -215,6 +355,13 @@ export const WordListPage: React.FC<Props> = ({
           <table style={S.wordTable}>
             <thead>
               <tr>
+                <th style={{ ...S.th, textAlign: "center", width: 44 }}>
+                  <input
+                    type="checkbox"
+                    checked={allWordsSelected}
+                    onChange={toggleSelectAllWords}
+                  />
+                </th>
                 <th style={S.th}>#</th>
                 <th style={S.th}>单词</th>
                 <th style={S.th}>音标</th>
@@ -222,6 +369,7 @@ export const WordListPage: React.FC<Props> = ({
                 <th style={{ ...S.th, textAlign: "center" }}>句式</th>
                 <th style={{ ...S.th, textAlign: "center" }}>例句</th>
                 <th style={{ ...S.th, textAlign: "center" }}>状态</th>
+                <th style={{ ...S.th, textAlign: "center", width: 96 }}>操作</th>
               </tr>
             </thead>
             <tbody>
@@ -229,6 +377,13 @@ export const WordListPage: React.FC<Props> = ({
                 const st = statusMap[w.status] || statusMap.pending;
                 return (
                   <tr key={w.id}>
+                    <td style={{ ...S.td, textAlign: "center" }}>
+                      <input
+                        type="checkbox"
+                        checked={selectedWordIds.includes(w.id)}
+                        onChange={() => toggleWordSelection(w.id)}
+                      />
+                    </td>
                     <td style={S.td}>{i + 1}</td>
                     <td style={{ ...S.td, fontFamily: "'Noto Serif SC', Georgia, serif", fontWeight: 700, fontSize: 16 }}>
                       {w.word}
@@ -248,12 +403,26 @@ export const WordListPage: React.FC<Props> = ({
                         {st.label}
                       </span>
                     </td>
+                    <td style={{ ...S.td, textAlign: "center" }}>
+                      <button
+                        onClick={() => deleteOneWord(w.id)}
+                        disabled={deletingWords}
+                        style={{
+                          ...S.dangerOutlineBtn,
+                          padding: "4px 10px",
+                          fontSize: 12,
+                          opacity: deletingWords ? 0.6 : 1,
+                        }}
+                      >
+                        <Trash2 size={12} /> 删除
+                      </button>
+                    </td>
                   </tr>
                 );
               })}
               {selectedList.words.length === 0 && (
                 <tr>
-                  <td colSpan={7} style={{ ...S.td, textAlign: "center", color: "#B0AAA4", padding: 40 }}>
+                  <td colSpan={9} style={{ ...S.td, textAlign: "center", color: "#B0AAA4", padding: 40 }}>
                     暂无词条
                   </td>
                 </tr>
@@ -275,6 +444,7 @@ const S: Record<string, React.CSSProperties> = {
   inputSmall: { padding: "6px 10px", border: "1px solid #E0DBD4", borderRadius: 6, fontSize: 13, color: "#2D2A26", outline: "none", background: "#FAFAF8", textAlign: "center" as const },
   primaryBtn: { display: "flex", alignItems: "center", gap: 6, padding: "9px 20px", backgroundColor: "#C8956C", color: "#fff", borderRadius: 8, fontSize: 14, fontWeight: 600, whiteSpace: "nowrap" as const },
   outlineBtn: { display: "flex", alignItems: "center", gap: 6, padding: "8px 16px", border: "1px solid #E0DBD4", borderRadius: 8, fontSize: 13, fontWeight: 500, color: "#6B6560", background: "#fff", whiteSpace: "nowrap" as const },
+  dangerOutlineBtn: { display: "flex", alignItems: "center", gap: 6, padding: "8px 12px", border: "1px solid #E7C9C9", borderRadius: 8, fontSize: 13, fontWeight: 500, color: "#B45B5B", background: "#fff", whiteSpace: "nowrap" as const },
   accentBtn: { display: "flex", alignItems: "center", gap: 6, padding: "7px 16px", backgroundColor: "#F5EDE4", color: "#C8956C", borderRadius: 8, fontSize: 13, fontWeight: 600, whiteSpace: "nowrap" as const },
   listTable: { border: "1px solid #E8E3DD", borderRadius: 10, overflow: "hidden" },
   tableHeader: { display: "flex", padding: "10px 20px", fontSize: 12, fontWeight: 500, color: "#A09A94", borderBottom: "1px solid #E8E3DD", backgroundColor: "#FAFAF8", textTransform: "uppercase" as const, letterSpacing: 0.5 },

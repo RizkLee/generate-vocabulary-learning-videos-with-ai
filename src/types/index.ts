@@ -81,6 +81,8 @@ export interface WordListConfigOverride {
   media?: Partial<{
     bgmPath: string;
     backgroundVideoPath: string;
+    scene4OutroTtsPath: string;
+    scene4OutroTtsSpeed: number;
   }>;
 }
 
@@ -102,6 +104,12 @@ export interface WestCoastWordProps extends Record<string, unknown> {
   bgmSrc: string;
   fps: number;
   previewMode: boolean;
+  scene4OutroTtsPath?: string;
+  scene4OutroTtsDuration?: number;
+  scene4OutroTtsSpeed?: number;
+  scene4PrevCoverSrc?: string;
+  scene4PrevWord?: string;
+  scene4LastExampleVideoSrc?: string;
 }
 
 // ===== 费用追踪 =====

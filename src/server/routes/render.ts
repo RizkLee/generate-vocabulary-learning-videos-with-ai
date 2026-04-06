@@ -4,6 +4,11 @@ import fs from "fs";
 import type { RenderJob, WordList } from "../../types/index.js";
 import { v4 as uuid } from "uuid";
 import { generateWordCovers } from "../../services/cover.js";
+import {
+  ensureScene4OutroTts,
+  getScene4OutroRelPath,
+  normalizeScene4OutroTtsSpeed,
+} from "../../services/scene4-outro.js";
 
 const router = Router();
 const DATA_DIR = path.resolve("data/wordlists");
@@ -133,6 +138,25 @@ async function renderWord(
   const bgVideoSrc =
     list.config?.media?.backgroundVideoPath || "videos/background.mp4";
   const bgmSrc = list.config?.media?.bgmPath || "audio/bgm.mp3";
+  const scene4OutroPath = getScene4OutroRelPath(
+    list.id,
+    list.config?.media?.scene4OutroTtsPath,
+  );
+  const scene4OutroSpeed = normalizeScene4OutroTtsSpeed(
+    list.config?.media?.scene4OutroTtsSpeed,
+  );
+  const scene4Outro = await ensureScene4OutroTts(PUBLIC_DIR, {
+    relativePath: scene4OutroPath,
+  });
+
+  const currentWordIndex = list.words.findIndex((w) => w.id === wordId);
+  const prevWord =
+    currentWordIndex > 0 ? list.words[currentWordIndex - 1] : undefined;
+
+  const lastExampleVideoSrc =
+    word.assets.exampleVideoPaths?.length
+      ? word.assets.exampleVideoPaths[word.assets.exampleVideoPaths.length - 1]
+      : undefined;
 
   const inputProps = {
     word,
@@ -140,6 +164,12 @@ async function renderWord(
     bgmSrc,
     fps: 30,
     previewMode: false,
+    scene4OutroTtsPath: scene4Outro.relativePath,
+    scene4OutroTtsDuration: scene4Outro.durationSec,
+    scene4OutroTtsSpeed: scene4OutroSpeed,
+    scene4PrevCoverSrc: prevWord?.assets.videoCover16x9Path,
+    scene4PrevWord: prevWord?.word,
+    scene4LastExampleVideoSrc: lastExampleVideoSrc,
   };
 
   const composition = await selectComposition({

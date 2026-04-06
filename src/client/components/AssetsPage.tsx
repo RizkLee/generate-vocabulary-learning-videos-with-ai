@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronDown, ChevronUp, Loader2, RefreshCw,
-  Volume2, ImageIcon, Film, Captions, Music, MonitorPlay, Edit3, Save, X,
+  Volume2, ImageIcon, Film, Captions, Music, MonitorPlay, Edit3, Save, X, Trash2,
 } from "lucide-react";
 import type { WordList, WordEntry, WordAssets } from "../../types/index";
 
@@ -23,10 +23,16 @@ interface WordDraft {
 const DEFAULT_TTS_SPEED = 1.25;
 const MIN_TTS_SPEED = 0.8;
 const MAX_TTS_SPEED = 1.6;
+const DEFAULT_SCENE4_OUTRO_SPEED = 1;
 const SPEED_OPTIONS = Array.from({ length: 17 }, (_, i) => Number((0.8 + i * 0.05).toFixed(2)));
 
 function normalizeTtsSpeed(speed?: number): number {
   if (!Number.isFinite(speed)) return DEFAULT_TTS_SPEED;
+  return Math.min(MAX_TTS_SPEED, Math.max(MIN_TTS_SPEED, Number(speed)));
+}
+
+function normalizeScene4OutroSpeed(speed?: number): number {
+  if (!Number.isFinite(speed)) return DEFAULT_SCENE4_OUTRO_SPEED;
   return Math.min(MAX_TTS_SPEED, Math.max(MIN_TTS_SPEED, Number(speed)));
 }
 
@@ -97,8 +103,110 @@ export const AssetsPage: React.FC<Props> = ({ wordList, onRefresh }) => {
   const [draft, setDraft] = useState<WordDraft | null>(null);
   const [renderVideoVersion, setRenderVideoVersion] = useState<Record<string, string>>({});
   const [ttsGlobalSpeedDraft, setTtsGlobalSpeedDraft] = useState<Record<string, number>>({});
+  const [videoCount, setVideoCount] = useState(2);
+  const [selectedWordIds, setSelectedWordIds] = useState<string[]>([]);
+  const [deletingWords, setDeletingWords] = useState(false);
+  const [scene4OutroSpeedDraft, setScene4OutroSpeedDraft] = useState(DEFAULT_SCENE4_OUTRO_SPEED);
+  const [coverHighlightDraft, setCoverHighlightDraft] = useState("西海岸");
   const bgmInputRef = useRef<HTMLInputElement | null>(null);
   const bgVideoInputRef = useRef<HTMLInputElement | null>(null);
+  const coverBgInputRef = useRef<HTMLInputElement | null>(null);
+  const scene4TtsInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    const idSet = new Set(wordList.words.map((w) => w.id));
+    setSelectedWordIds((prev) => prev.filter((id) => idSet.has(id)));
+  }, [wordList.id, wordList.updatedAt]);
+
+  useEffect(() => {
+    setScene4OutroSpeedDraft(
+      normalizeScene4OutroSpeed(wordList.config?.media?.scene4OutroTtsSpeed),
+    );
+    setCoverHighlightDraft(wordList.config?.cover?.titleHighlight || "西海岸");
+  }, [
+    wordList.id,
+    wordList.updatedAt,
+    wordList.config?.media?.scene4OutroTtsSpeed,
+    wordList.config?.cover?.titleHighlight,
+  ]);
+
+  const selectedWordCount = wordList.words.filter((w) =>
+    selectedWordIds.includes(w.id),
+  ).length;
+  const allWordsSelected =
+    wordList.words.length > 0 &&
+    selectedWordCount === wordList.words.length;
+
+  const toggleWordSelection = (wordId: string) => {
+    setSelectedWordIds((prev) =>
+      prev.includes(wordId)
+        ? prev.filter((id) => id !== wordId)
+        : [...prev, wordId],
+    );
+  };
+
+  const toggleSelectAllWords = () => {
+    if (allWordsSelected) {
+      setSelectedWordIds([]);
+      return;
+    }
+    setSelectedWordIds(wordList.words.map((w) => w.id));
+  };
+
+  const deleteWords = async (wordIds: string[]) => {
+    if (wordIds.length === 0 || deletingWords) return false;
+
+    setDeletingWords(true);
+    try {
+      const res = await fetch(`/api/wordlists/${wordList.id}/words/batch-delete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ wordIds }),
+      });
+      const data = await parseApiResponse(res);
+
+      if (data.success) {
+        const deletedCount = data.data?.deletedCount || 0;
+        setSelectedWordIds((prev) => prev.filter((id) => !wordIds.includes(id)));
+        if (expanded && wordIds.includes(expanded)) setExpanded(null);
+        if (editingWordId && wordIds.includes(editingWordId)) {
+          setEditingWordId(null);
+          setDraft(null);
+        }
+        setStatusMsg((p) => ({
+          ...p,
+          "words-delete": { ok: true, text: `已删除 ${deletedCount} 个词条` },
+        }));
+        onRefresh();
+        return true;
+      }
+
+      setStatusMsg((p) => ({
+        ...p,
+        "words-delete": { ok: false, text: data.error || "删除失败" },
+      }));
+      return false;
+    } catch (e: any) {
+      setStatusMsg((p) => ({
+        ...p,
+        "words-delete": { ok: false, text: e.message || "删除失败" },
+      }));
+      return false;
+    } finally {
+      setDeletingWords(false);
+    }
+  };
+
+  const deleteOneWord = async (wordId: string, wordLabel: string) => {
+    if (!window.confirm(`确认删除词条「${wordLabel}」吗？`)) return;
+    await deleteWords([wordId]);
+  };
+
+  const deleteSelectedWords = async () => {
+    if (selectedWordCount === 0) return;
+    if (!window.confirm(`确认批量删除 ${selectedWordCount} 个词条吗？`)) return;
+    await deleteWords(selectedWordIds);
+  };
 
   const regen = async (
     key: string,
@@ -218,7 +326,7 @@ export const AssetsPage: React.FC<Props> = ({ wordList, onRefresh }) => {
   };
 
   const uploadPublicAsset = async (
-    assetType: "bgm" | "background",
+    assetType: "bgm" | "background" | "cover-background" | "scene4-tts",
     file?: File,
   ) => {
     if (!file) return;
@@ -256,6 +364,56 @@ export const AssetsPage: React.FC<Props> = ({ wordList, onRefresh }) => {
       setStatusMsg((p) => ({
         ...p,
         [key]: { ok: false, text: e.message || "替换失败" },
+      }));
+    } finally {
+      setLoading((p) => ({ ...p, [key]: false }));
+    }
+  };
+
+  const saveListConfigPatch = async (
+    key: string,
+    patch: {
+      media?: Partial<NonNullable<NonNullable<WordList["config"]>["media"]>>;
+      cover?: Partial<NonNullable<NonNullable<WordList["config"]>["cover"]>>;
+    },
+    successText: string,
+  ) => {
+    setLoading((p) => ({ ...p, [key]: true }));
+    setStatusMsg((p) => ({ ...p, [key]: { ok: true, text: "保存中..." } }));
+
+    try {
+      const mergedConfig = {
+        ...(wordList.config || {}),
+        media: {
+          ...(wordList.config?.media || {}),
+          ...(patch.media || {}),
+        },
+        cover: {
+          ...(wordList.config?.cover || {}),
+          ...(patch.cover || {}),
+        },
+      };
+
+      const res = await fetch(`/api/wordlists/${wordList.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config: mergedConfig }),
+      });
+      const data = await parseApiResponse(res);
+
+      if (data.success) {
+        setStatusMsg((p) => ({ ...p, [key]: { ok: true, text: successText } }));
+        onRefresh();
+      } else {
+        setStatusMsg((p) => ({
+          ...p,
+          [key]: { ok: false, text: data.error || "保存失败" },
+        }));
+      }
+    } catch (e: any) {
+      setStatusMsg((p) => ({
+        ...p,
+        [key]: { ok: false, text: e.message || "保存失败" },
       }));
     } finally {
       setLoading((p) => ({ ...p, [key]: false }));
@@ -655,11 +813,27 @@ export const AssetsPage: React.FC<Props> = ({ wordList, onRefresh }) => {
       <div key={word.id} style={S.wordCard}>
         <div style={S.wordHeader} onClick={() => setExpanded(isOpen ? null : word.id)}>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <input
+              type="checkbox"
+              checked={selectedWordIds.includes(word.id)}
+              onClick={(e) => e.stopPropagation()}
+              onChange={() => toggleWordSelection(word.id)}
+            />
             <span style={{ fontFamily: "'Noto Serif SC', serif", fontWeight: 700, fontSize: 16 }}>{word.word}</span>
             <span style={{ fontSize: 12, color: "#8A8580", fontFamily: "monospace" }}>{word.phonetic}</span>
             <span style={{ fontSize: 13, color: "#8A8580" }}>{word.chineseMeaning}</span>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <button
+              style={{ ...S.deleteWordBtn, opacity: deletingWords ? 0.6 : 1 }}
+              onClick={(e) => {
+                e.stopPropagation();
+                void deleteOneWord(word.id, word.word);
+              }}
+              disabled={deletingWords}
+            >
+              <Trash2 size={12} /> 删除
+            </button>
             <button
               style={S.editBtn}
               onClick={(e) => {
@@ -836,10 +1010,13 @@ export const AssetsPage: React.FC<Props> = ({ wordList, onRefresh }) => {
                 <RegenBtn
                   k={`${word.id}-vid`}
                   endpoint={`${base}/video/${wordList.id}/${word.id}`}
-                  body={{ confirmed: true }}
+                  body={{ confirmed: true, videoCount }}
                   label="全部重生成"
                   successText={(resp) => {
                     const meta = resp?.meta;
+                    if (meta?.skippedScene3) {
+                      return "已清空第三幕素材，后续渲染将直接跳过第三幕";
+                    }
                     if (meta?.subtitleAutoRegenerated) {
                       return "视频已重生，字幕已自动同步";
                     }
@@ -1011,6 +1188,11 @@ export const AssetsPage: React.FC<Props> = ({ wordList, onRefresh }) => {
   const listBgmPath = wordList.config?.media?.bgmPath || "audio/bgm.mp3";
   const listBackgroundVideoPath =
     wordList.config?.media?.backgroundVideoPath || "videos/background.mp4";
+  const scene4OutroTtsPath =
+    wordList.config?.media?.scene4OutroTtsPath ||
+    `audio/${wordList.id}/scene4_outro.wav`;
+  const coverBackgroundPath =
+    wordList.config?.cover?.backgroundImagePath || "images/video-cover.png";
 
   return (
     <div>
@@ -1084,6 +1266,7 @@ export const AssetsPage: React.FC<Props> = ({ wordList, onRefresh }) => {
               </div>
             )}
           </div>
+
           <div style={S.materialCard}>
             <div style={S.materialHeader}>
               <div style={S.materialTitle}>
@@ -1133,11 +1316,256 @@ export const AssetsPage: React.FC<Props> = ({ wordList, onRefresh }) => {
               </div>
             )}
           </div>
+
+          <div style={S.materialCard}>
+            <div style={S.materialHeader}>
+              <div style={S.materialTitle}>
+                <Volume2 size={16} color="#C8956C" />
+                <span style={{ fontWeight: 600, fontSize: 14 }}>第四幕 TTS</span>
+              </div>
+              <div style={S.materialActionGroup}>
+                <button
+                  type="button"
+                  style={{
+                    ...S.materialActionBtn,
+                    opacity: loading["public-scene4-tts-upload"] ? 0.6 : 1,
+                  }}
+                  disabled={!!loading["public-scene4-tts-upload"]}
+                  onClick={() => scene4TtsInputRef.current?.click()}
+                >
+                  {loading["public-scene4-tts-upload"] ? (
+                    <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} />
+                  ) : (
+                    <RefreshCw size={12} />
+                  )}
+                  上传替换
+                </button>
+                <input
+                  ref={scene4TtsInputRef}
+                  type="file"
+                  accept=".wav,audio/wav,audio/x-wav"
+                  style={{ display: "none" }}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    uploadPublicAsset("scene4-tts", file);
+                    e.currentTarget.value = "";
+                  }}
+                />
+              </div>
+            </div>
+            <audio controls src={url(scene4OutroTtsPath, publicAssetVersion)} style={{ width: "100%" }} preload="none" />
+            <div style={S.materialInlineRow}>
+              <span style={{ fontSize: 12, color: "#8A8580" }}>渲染倍速</span>
+              <select
+                value={normalizeScene4OutroSpeed(scene4OutroSpeedDraft).toFixed(2)}
+                style={S.speedSelect}
+                onChange={(e) => setScene4OutroSpeedDraft(Number(e.target.value))}
+                disabled={!!loading["public-scene4-tts-speed"]}
+              >
+                {SPEED_OPTIONS.map((s) => (
+                  <option key={`scene4-speed-${s}`} value={s.toFixed(2)}>
+                    {s.toFixed(2)}x
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                style={{ ...S.materialActionBtn, padding: "6px 10px", fontSize: 12 }}
+                disabled={!!loading["public-scene4-tts-speed"]}
+                onClick={() => {
+                  saveListConfigPatch(
+                    "public-scene4-tts-speed",
+                    { media: { scene4OutroTtsSpeed: normalizeScene4OutroSpeed(scene4OutroSpeedDraft) } },
+                    "第四幕语速已更新",
+                  );
+                }}
+              >
+                保存倍速
+              </button>
+            </div>
+            <div style={S.materialInlineRow}>
+              <RegenBtn
+                k="public-scene4-tts-regenerate"
+                endpoint={`/api/generate/scene4-outro-tts/${wordList.id}`}
+                body={{ speed: normalizeScene4OutroSpeed(scene4OutroSpeedDraft) }}
+                label="重新生成"
+                successText="第四幕 TTS 已重新生成"
+              />
+            </div>
+            <div style={S.materialMeta}>当前词本路径：{scene4OutroTtsPath}</div>
+            {statusMsg["public-scene4-tts-upload"] && (
+              <div
+                style={{
+                  ...S.materialMsg,
+                  color: statusMsg["public-scene4-tts-upload"].ok ? "#6B9E6B" : "#C05050",
+                }}
+              >
+                {statusMsg["public-scene4-tts-upload"].text}
+              </div>
+            )}
+            {statusMsg["public-scene4-tts-speed"] && (
+              <div
+                style={{
+                  ...S.materialMsg,
+                  color: statusMsg["public-scene4-tts-speed"].ok ? "#6B9E6B" : "#C05050",
+                }}
+              >
+                {statusMsg["public-scene4-tts-speed"].text}
+              </div>
+            )}
+          </div>
+
+          <div style={S.materialCard}>
+            <div style={S.materialHeader}>
+              <div style={S.materialTitle}>
+                <ImageIcon size={16} color="#C8956C" />
+                <span style={{ fontWeight: 600, fontSize: 14 }}>封面背景图</span>
+              </div>
+              <button
+                type="button"
+                style={{
+                  ...S.materialActionBtn,
+                  opacity: loading["public-cover-background-upload"] ? 0.6 : 1,
+                }}
+                disabled={!!loading["public-cover-background-upload"]}
+                onClick={() => coverBgInputRef.current?.click()}
+              >
+                {loading["public-cover-background-upload"] ? (
+                  <Loader2 size={12} style={{ animation: "spin 1s linear infinite" }} />
+                ) : (
+                  <RefreshCw size={12} />
+                )}
+                替换
+              </button>
+              <input
+                ref={coverBgInputRef}
+                type="file"
+                accept="image/*,.jpg,.jpeg,.png,.webp,.bmp"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  uploadPublicAsset("cover-background", file);
+                  e.currentTarget.value = "";
+                }}
+              />
+            </div>
+            <div style={S.mediaFrame}>
+              <img src={url(coverBackgroundPath, publicAssetVersion)} alt="cover-background" style={S.coverImg} />
+            </div>
+            <div style={S.materialMeta}>当前词本路径：{coverBackgroundPath}</div>
+            {statusMsg["public-cover-background-upload"] && (
+              <div
+                style={{
+                  ...S.materialMsg,
+                  color: statusMsg["public-cover-background-upload"].ok ? "#6B9E6B" : "#C05050",
+                }}
+              >
+                {statusMsg["public-cover-background-upload"].text}
+              </div>
+            )}
+          </div>
+
+          <div style={S.materialCard}>
+            <div style={S.materialHeader}>
+              <div style={S.materialTitle}>
+                <ImageIcon size={16} color="#C8956C" />
+                <span style={{ fontWeight: 600, fontSize: 14 }}>封面高亮词（黄色字）</span>
+              </div>
+            </div>
+            <div style={S.materialInlineRow}>
+              <input
+                value={coverHighlightDraft}
+                onChange={(e) => setCoverHighlightDraft(e.target.value)}
+                style={{ ...S.input, minWidth: 180, flex: 1 }}
+                placeholder="例如：西海岸"
+              />
+              <button
+                type="button"
+                style={{ ...S.materialActionBtn, padding: "7px 12px", fontSize: 12 }}
+                disabled={!!loading["public-cover-highlight"]}
+                onClick={() => {
+                  const nextText = coverHighlightDraft.trim() || "西海岸";
+                  saveListConfigPatch(
+                    "public-cover-highlight",
+                    { cover: { titleHighlight: nextText } },
+                    "封面高亮词已更新",
+                  );
+                }}
+              >
+                保存
+              </button>
+            </div>
+            <div style={S.materialMeta}>该字段会作用于后续生成/重渲染产出的封面。</div>
+            {statusMsg["public-cover-highlight"] && (
+              <div
+                style={{
+                  ...S.materialMsg,
+                  color: statusMsg["public-cover-highlight"].ok ? "#6B9E6B" : "#C05050",
+                }}
+              >
+                {statusMsg["public-cover-highlight"].text}
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
       <div style={S.section}>
-        <h3 style={{ ...S.sectionTitle, marginBottom: 12 }}>词条资源详情</h3>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
+          <h3 style={{ ...S.sectionTitle, marginBottom: 0 }}>词条资源详情</h3>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <div style={S.videoCountBar}>
+              <span style={{ fontSize: 12, color: "#8A8580" }}>第三幕 AI 视频数</span>
+              {[0, 1, 2].map((count) => (
+                <button
+                  key={count}
+                  type="button"
+                  onClick={() => setVideoCount(count)}
+                  style={{
+                    ...S.videoCountBtn,
+                    ...(videoCount === count ? S.videoCountBtnActive : {}),
+                  }}
+                >
+                  {count}
+                </button>
+              ))}
+            </div>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#8A8580" }}>
+              <input
+                type="checkbox"
+                checked={allWordsSelected}
+                onChange={toggleSelectAllWords}
+              />
+              全选
+            </label>
+            <button
+              type="button"
+              style={{
+                ...S.batchDeleteBtn,
+                opacity: selectedWordCount === 0 || deletingWords ? 0.6 : 1,
+                cursor: selectedWordCount === 0 || deletingWords ? "not-allowed" : "pointer",
+              }}
+              disabled={selectedWordCount === 0 || deletingWords}
+              onClick={() => {
+                void deleteSelectedWords();
+              }}
+            >
+              <Trash2 size={12} />
+              {deletingWords ? "删除中..." : `批量删除 (${selectedWordCount})`}
+            </button>
+          </div>
+        </div>
+        {statusMsg["words-delete"] && (
+          <div
+            style={{
+              fontSize: 12,
+              marginBottom: 10,
+              color: statusMsg["words-delete"].ok ? "#6B9E6B" : "#C05050",
+            }}
+          >
+            {statusMsg["words-delete"].text}
+          </div>
+        )}
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {wordList.words.map(renderWord)}
           {stats.total === 0 && <div style={S.emptyAsset}>暂无词条</div>}
@@ -1158,11 +1586,18 @@ const S: Record<string, React.CSSProperties> = {
   materialCard: { padding: 16, backgroundColor: "#FAFAF8", borderRadius: 10, border: "1px solid #E8E3DD" },
   materialHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 10 },
   materialTitle: { display: "flex", alignItems: "center", gap: 8 },
+  materialActionGroup: { display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" as const },
+  materialInlineRow: { display: "flex", alignItems: "center", gap: 8, marginTop: 10, flexWrap: "wrap" as const },
   materialActionBtn: { display: "flex", alignItems: "center", gap: 4, padding: "4px 10px", border: "1px solid #E0DBD4", borderRadius: 6, fontSize: 11, color: "#6B6560", backgroundColor: "#fff" },
   materialMeta: { marginTop: 8, fontSize: 11, color: "#8A8580", wordBreak: "break-all" as const },
   materialMsg: { marginTop: 6, fontSize: 11 },
   wordCard: { border: "1px solid #E8E3DD", borderRadius: 10, overflow: "hidden" },
   wordHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 20px", cursor: "pointer", backgroundColor: "#FAFAF8" },
+  videoCountBar: { display: "flex", alignItems: "center", gap: 6, padding: "5px 8px", border: "1px solid #E8E3DD", borderRadius: 8, backgroundColor: "#FAFAF8" },
+  videoCountBtn: { width: 26, height: 26, borderRadius: 6, border: "1px solid #E0DBD4", backgroundColor: "#fff", color: "#6B6560", fontSize: 12, fontWeight: 600 },
+  videoCountBtnActive: { borderColor: "#C8956C", backgroundColor: "#FDF8F3", color: "#C8956C" },
+  deleteWordBtn: { display: "flex", alignItems: "center", gap: 4, padding: "5px 10px", fontSize: 11, border: "1px solid #E7C9C9", borderRadius: 6, backgroundColor: "#FFF5F5", color: "#B45B5B" },
+  batchDeleteBtn: { display: "flex", alignItems: "center", gap: 6, padding: "6px 12px", fontSize: 12, border: "1px solid #E7C9C9", borderRadius: 7, backgroundColor: "#FFF5F5", color: "#B45B5B" },
   editBtn: { display: "flex", alignItems: "center", gap: 4, padding: "5px 10px", fontSize: 11, border: "1px solid #E0DBD4", borderRadius: 6, backgroundColor: "#fff", color: "#6B6560" },
   badge: { display: "inline-block", padding: "3px 12px", borderRadius: 12, fontSize: 12, fontWeight: 500 },
   details: { padding: "0 20px 20px", borderTop: "1px solid #E8E3DD", backgroundColor: "#fff" },

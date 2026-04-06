@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo } from "react";
 import {
-  FileText, Mic, Image, Film, Subtitles, Clapperboard,
+  Mic, Image, Film, Subtitles, Clapperboard, MonitorPlay,
   ChevronDown, ChevronUp, Loader2, CheckCircle2, XCircle, Circle, Play,
   SquareCheck, Square,
 } from "lucide-react";
@@ -11,7 +11,7 @@ interface Props {
   onRefresh: () => void;
 }
 
-type StepKey = "content" | "tts" | "image" | "video" | "subtitles" | "render";
+type StepKey = "tts" | "image" | "video" | "subtitles" | "render";
 interface StepDef {
   key: StepKey;
   label: string;
@@ -21,13 +21,40 @@ interface StepDef {
 }
 
 const STEPS: StepDef[] = [
-  { key: "content", label: "生成内容", desc: "AI 生成单词释义、句式、例句", cost: "~$0.001", icon: <FileText size={18} /> },
   { key: "tts", label: "生成 TTS 音频", desc: "中英文配音、句式朗读", cost: "~$0.05", icon: <Mic size={18} /> },
   { key: "image", label: "搜索插图", desc: "Pixabay 搜索匹配图片", cost: "免费", icon: <Image size={18} /> },
   { key: "video", label: "生成 AI 视频", desc: "Veo 3.1 生成例句视频", cost: "~$2.40", icon: <Film size={18} /> },
   { key: "subtitles", label: "生成字幕", desc: "语音识别 + 校对", cost: "~$0.01", icon: <Subtitles size={18} /> },
   { key: "render", label: "渲染成片", desc: "Remotion 渲染最终视频", cost: "本地", icon: <Clapperboard size={18} /> },
 ];
+
+const MAX_QUOTA_RETRY = 3;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function extractErrorText(payload: any): string {
+  if (!payload) return "";
+  if (typeof payload === "string") return payload;
+  if (typeof payload.error === "string") return payload.error;
+  try {
+    return JSON.stringify(payload.error || payload);
+  } catch {
+    return String(payload.error || payload);
+  }
+}
+
+function isQuotaExceededError(message: string): boolean {
+  const text = (message || "").toLowerCase();
+  return (
+    text.includes("resource_exhausted") ||
+    text.includes("quota exceeded") ||
+    text.includes("global_generate_content_requests") ||
+    text.includes("\"code\":429") ||
+    text.includes(" status\":\"resource_exhausted\"")
+  );
+}
 
 const statusMap: Record<string, { label: string; color: string; bg: string }> = {
   pending: { label: "待处理", color: "#8A8580", bg: "#F0EDE8" },
@@ -47,6 +74,7 @@ interface LogEntry {
 export const GeneratePage: React.FC<Props> = ({ wordList, onRefresh }) => {
   const [selectionMode, setSelectionMode] = useState<"batch" | "manual">("batch");
   const [batchCount, setBatchCount] = useState(2);
+  const [videoCount, setVideoCount] = useState(2);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [processing, setProcessing] = useState(false);
   const [currentStep, setCurrentStep] = useState<StepKey | null>(null);
@@ -54,6 +82,8 @@ export const GeneratePage: React.FC<Props> = ({ wordList, onRefresh }) => {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [expandedStep, setExpandedStep] = useState<StepKey | null>(null);
   const [stepResults, setStepResults] = useState<Record<string, "idle" | "running" | "done" | "error">>({});
+  const [renderPreviewOrder, setRenderPreviewOrder] = useState<string[]>([]);
+  const [renderPreviewVersions, setRenderPreviewVersions] = useState<Record<string, string>>({});
   const logEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -90,26 +120,94 @@ export const GeneratePage: React.FC<Props> = ({ wordList, onRefresh }) => {
     }]);
   };
 
+  const markRenderedPreview = (wordId: string) => {
+    const version = new Date().toISOString();
+    setRenderPreviewVersions((prev) => ({ ...prev, [wordId]: version }));
+    setRenderPreviewOrder((prev) => [wordId, ...prev.filter((id) => id !== wordId)]);
+  };
+
   const getEndpoint = (step: StepKey, wordId: string) => {
     if (step === "render") return `/api/render/${wordList.id}/${wordId}`;
-    if (step === "content") return `/api/generate/content/${wordList.id}/${wordId}`;
     return `/api/generate/${step}/${wordList.id}/${wordId}`;
   };
 
-  const runStep = async (step: StepKey, word: WordEntry): Promise<boolean> => {
+  const runStep = async (
+    step: StepKey,
+    word: WordEntry,
+    options?: { videoCount?: number },
+  ): Promise<boolean> => {
     const endpoint = getEndpoint(step, word.id);
-    const body = step === "video" ? JSON.stringify({ confirmed: true }) : undefined;
+    const effectiveVideoCount = options?.videoCount ?? videoCount;
+    const body = step === "video"
+      ? JSON.stringify({ confirmed: true, videoCount: effectiveVideoCount })
+      : undefined;
 
     addLog(word.word, step, "progress", `正在执行...`);
     setStepResults((p) => ({ ...p, [`${word.id}-${step}`]: "running" }));
 
     try {
-      const res = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body,
-      });
-      const data = await res.json();
+      let data: any = null;
+
+      for (let retry = 0; retry <= MAX_QUOTA_RETRY; retry++) {
+        try {
+          const res = await fetch(endpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body,
+          });
+          data = await res.json();
+
+          if (data.success) break;
+
+          const errorText = extractErrorText(data);
+          const shouldRetry =
+            step !== "render" &&
+            retry < MAX_QUOTA_RETRY &&
+            isQuotaExceededError(errorText);
+
+          if (shouldRetry) {
+            const waitSec = 12 + retry * 8;
+            addLog(
+              word.word,
+              step,
+              "progress",
+              `触发配额限制，${waitSec}s 后自动重试 (${retry + 1}/${MAX_QUOTA_RETRY})`,
+            );
+            await sleep(waitSec * 1000);
+            continue;
+          }
+
+          addLog(word.word, step, "error", errorText || "失败");
+          setStepResults((p) => ({ ...p, [`${word.id}-${step}`]: "error" }));
+          return false;
+        } catch (err: any) {
+          const errorText = err?.message || "请求失败";
+          const shouldRetry =
+            step !== "render" &&
+            retry < MAX_QUOTA_RETRY &&
+            isQuotaExceededError(errorText);
+
+          if (shouldRetry) {
+            const waitSec = 12 + retry * 8;
+            addLog(
+              word.word,
+              step,
+              "progress",
+              `触发配额限制，${waitSec}s 后自动重试 (${retry + 1}/${MAX_QUOTA_RETRY})`,
+            );
+            await sleep(waitSec * 1000);
+            continue;
+          }
+
+          throw err;
+        }
+      }
+
+      if (!data?.success) {
+        addLog(word.word, step, "error", "请求失败");
+        setStepResults((p) => ({ ...p, [`${word.id}-${step}`]: "error" }));
+        return false;
+      }
 
       if (step === "render" && data.success) {
         const jobId = data.data.id;
@@ -119,10 +217,17 @@ export const GeneratePage: React.FC<Props> = ({ wordList, onRefresh }) => {
           await new Promise((r) => setTimeout(r, 5000));
           const pollRes = await fetch(`/api/render/jobs/${jobId}`);
           const pollData = await pollRes.json();
+          if (!pollData.success || !pollData.data) {
+            addLog(word.word, step, "error", pollData.error || "查询渲染任务失败");
+            setStepResults((p) => ({ ...p, [`${word.id}-${step}`]: "error" }));
+            return false;
+          }
+
           if (pollData.data.status === "done") {
             done = true;
             addLog(word.word, step, "success", `渲染完成`);
             setStepResults((p) => ({ ...p, [`${word.id}-${step}`]: "done" }));
+            markRenderedPreview(word.id);
           } else if (pollData.data.status === "error") {
             addLog(word.word, step, "error", pollData.data.error || "渲染失败");
             setStepResults((p) => ({ ...p, [`${word.id}-${step}`]: "error" }));
@@ -132,12 +237,6 @@ export const GeneratePage: React.FC<Props> = ({ wordList, onRefresh }) => {
           }
         }
         return true;
-      }
-
-      if (!data.success) {
-        addLog(word.word, step, "error", data.error || "失败");
-        setStepResults((p) => ({ ...p, [`${word.id}-${step}`]: "error" }));
-        return false;
       }
 
       addLog(word.word, step, "success", `完成`);
@@ -150,25 +249,26 @@ export const GeneratePage: React.FC<Props> = ({ wordList, onRefresh }) => {
     }
   };
 
-  const runFullPipeline = async (includeVeo: boolean) => {
+  const runFullPipeline = async (targetVideoCount: number, shouldRender: boolean) => {
     if (wordsToProcess.length === 0) return;
     setProcessing(true);
     setLogs([]);
     setStepResults({});
+    if (shouldRender) {
+      setRenderPreviewOrder([]);
+      setRenderPreviewVersions({});
+    }
 
-    addLog("", "pipeline", "info", `开始处理 ${wordsToProcess.length} 个单词${includeVeo ? " (含 AI 视频)" : " (跳过 AI 视频)"}`);
+    addLog(
+      "",
+      "pipeline",
+      "info",
+      `开始处理 ${wordsToProcess.length} 个单词 (第三幕 AI 视频数量: ${targetVideoCount}，${shouldRender ? "包含渲染成片" : "不渲染成片"})`,
+    );
 
     for (const word of wordsToProcess) {
       setCurrentWord(word.word);
       addLog(word.word, "pipeline", "info", `--- 开始 ---`);
-
-      if (word.status === "pending") {
-        setCurrentStep("content");
-        const ok = await runStep("content", word);
-        if (!ok) continue;
-      } else {
-        addLog(word.word, "content", "success", "内容已就绪，跳过");
-      }
 
       if (!word.assets.chineseWordTtsPath && !word.assets.chineseTtsPath) {
         setCurrentStep("tts");
@@ -184,19 +284,32 @@ export const GeneratePage: React.FC<Props> = ({ wordList, onRefresh }) => {
         addLog(word.word, "image", "success", "图片已就绪，跳过");
       }
 
-      if (includeVeo && !word.assets.exampleVideoPaths?.length) {
-        setCurrentStep("video");
-        const ok = await runStep("video", word);
-        if (ok) {
-          setCurrentStep("subtitles");
-          await runStep("subtitles", word);
+      const existingVideoCount = word.assets.exampleVideoPaths?.length || 0;
+      const existingSubtitleCount = word.assets.subtitleData?.length || 0;
+
+      if (targetVideoCount === 0) {
+        if (existingVideoCount > 0 || existingSubtitleCount > 0) {
+          setCurrentStep("video");
+          await runStep("video", word, { videoCount: targetVideoCount });
+        } else {
+          addLog(word.word, "video", "success", "第三幕已关闭，跳过");
         }
-      } else if (includeVeo) {
-        addLog(word.word, "video", "success", "AI 视频已就绪，跳过");
+      } else if (existingVideoCount !== targetVideoCount) {
+        setCurrentStep("video");
+        await runStep("video", word, { videoCount: targetVideoCount });
+      } else if (existingSubtitleCount < targetVideoCount) {
+        setCurrentStep("subtitles");
+        await runStep("subtitles", word);
+      } else {
+        addLog(word.word, "video", "success", `AI 视频数量已是 ${targetVideoCount}，跳过`);
       }
 
-      setCurrentStep("render");
-      await runStep("render", word);
+      if (shouldRender) {
+        setCurrentStep("render");
+        await runStep("render", word);
+      } else {
+        addLog(word.word, "render", "info", "按当前流水线配置跳过成片渲染");
+      }
 
       addLog(word.word, "pipeline", "success", `--- 完成 ---`);
     }
@@ -212,10 +325,14 @@ export const GeneratePage: React.FC<Props> = ({ wordList, onRefresh }) => {
     if (wordsToProcess.length === 0) return;
     setProcessing(true);
     setCurrentStep(step);
+    if (step === "render") {
+      setRenderPreviewOrder([]);
+      setRenderPreviewVersions({});
+    }
     addLog("", step, "info", `对 ${wordsToProcess.length} 个单词执行: ${STEPS.find((s) => s.key === step)?.label}`);
     for (const word of wordsToProcess) {
       setCurrentWord(word.word);
-      await runStep(step, word);
+      await runStep(step, word, step === "video" ? { videoCount } : undefined);
     }
     onRefresh();
     setProcessing(false);
@@ -230,6 +347,15 @@ export const GeneratePage: React.FC<Props> = ({ wordList, onRefresh }) => {
   };
 
   const renderedCount = wordList.words.filter((w) => w.status === "rendered").length;
+  const selectedVideoCost = (videoCount * 1.2).toFixed(2);
+  const renderPreviewItems = renderPreviewOrder.map((wordId) => {
+    const word = wordList.words.find((w) => w.id === wordId);
+    return {
+      wordId,
+      wordLabel: word?.word || wordId.slice(0, 8),
+      version: renderPreviewVersions[wordId] || "",
+    };
+  });
 
   return (
     <div>
@@ -373,7 +499,9 @@ export const GeneratePage: React.FC<Props> = ({ wordList, onRefresh }) => {
                   </div>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                  <span style={S.costTag}>{step.cost}</span>
+                  <span style={S.costTag}>
+                    {step.key === "video" ? (videoCount === 0 ? "$0.00" : `~$${selectedVideoCost}`) : step.cost}
+                  </span>
                   <button
                     onClick={(e) => { e.stopPropagation(); runSingleStep(step.key); }}
                     disabled={processing || wordsToProcess.length === 0}
@@ -415,28 +543,78 @@ export const GeneratePage: React.FC<Props> = ({ wordList, onRefresh }) => {
           );
         })}
 
+        <div style={S.videoCountBar}>
+          <span style={S.videoCountLabel}>第三幕 AI 视频数量</span>
+          <div style={{ display: "flex", gap: 8 }}>
+            {[0, 1, 2].map((count) => (
+              <button
+                key={count}
+                onClick={() => setVideoCount(count)}
+                disabled={processing}
+                style={{
+                  ...S.videoCountBtn,
+                  ...(videoCount === count ? S.videoCountBtnActive : {}),
+                  opacity: processing ? 0.6 : 1,
+                }}
+              >
+                {count}
+              </button>
+            ))}
+          </div>
+          <span style={S.videoCountHint}>
+            {videoCount === 0
+              ? "本次将移除第三幕并缩短成片"
+              : `本次每词生成 ${videoCount} 段AI视频，预估 ~$${selectedVideoCost}/词`}
+          </span>
+        </div>
+
         {/* 一键运行按钮 */}
         <div style={{ display: "flex", gap: 12, marginTop: 20 }}>
           <button
-            onClick={() => runFullPipeline(false)}
+            onClick={() => runFullPipeline(0, false)}
             disabled={processing || wordsToProcess.length === 0}
             style={{ ...S.pipelineBtn, backgroundColor: "#5B7DB1", opacity: wordsToProcess.length === 0 ? 0.4 : 1 }}
           >
-            {processing && !currentStep?.includes("video")
+            {processing
               ? <><Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} /> 处理中...</>
-              : `运行流水线 — 跳过 AI 视频 (${wordsToProcess.length} 条)`}
+              : `运行流水线 — 跳过 AI 视频（不渲染）(${wordsToProcess.length} 条)`}
           </button>
           <button
-            onClick={() => runFullPipeline(true)}
+            onClick={() => runFullPipeline(videoCount, true)}
             disabled={processing || wordsToProcess.length === 0}
             style={{ ...S.pipelineBtn, backgroundColor: "#C8956C", opacity: wordsToProcess.length === 0 ? 0.4 : 1 }}
           >
             {processing
               ? <><Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} /> 处理中 ({currentWord})...</>
-              : `完整流水线 — 含 AI 视频 (${wordsToProcess.length} 条)`}
+              : `完整流水线 — 第三幕 ${videoCount} 段 (${wordsToProcess.length} 条)`}
           </button>
         </div>
       </div>
+
+      {renderPreviewItems.length > 0 && (
+        <div style={S.section}>
+          <h3 style={{ ...S.sectionTitle, marginBottom: 12 }}>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+              <MonitorPlay size={18} /> 本次生成成片预览
+            </span>
+          </h3>
+          <div style={S.previewGrid}>
+            {renderPreviewItems.map((item) => (
+              <div key={item.wordId} style={S.previewCard}>
+                <div style={S.previewTitle}>{item.wordLabel}</div>
+                <div style={S.previewViewport}>
+                  <video
+                    controls
+                    preload="metadata"
+                    src={`/output/${item.wordId}.mp4?v=${encodeURIComponent(item.version)}`}
+                    style={S.previewVideo}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* 实时日志 */}
       {logs.length > 0 && (
@@ -476,9 +654,19 @@ const S: Record<string, React.CSSProperties> = {
   stepIcon: { color: "#8A8580", flexShrink: 0 },
   costTag: { fontSize: 11, color: "#B0AAA4", backgroundColor: "#F0EDE8", padding: "2px 8px", borderRadius: 8 },
   stepRunBtn: { display: "flex", alignItems: "center", gap: 4, padding: "5px 12px", backgroundColor: "#fff", border: "1px solid #E0DBD4", borderRadius: 6, fontSize: 12, fontWeight: 500, color: "#6B6560" },
+  videoCountBar: { display: "flex", alignItems: "center", gap: 12, marginTop: 12, padding: "10px 12px", borderRadius: 8, backgroundColor: "#FAFAF8", border: "1px solid #E8E3DD", flexWrap: "wrap" as const },
+  videoCountLabel: { fontSize: 13, color: "#6B6560", fontWeight: 600 },
+  videoCountBtn: { width: 30, height: 30, borderRadius: 6, border: "1px solid #E0DBD4", backgroundColor: "#fff", color: "#6B6560", fontSize: 13, fontWeight: 600 },
+  videoCountBtnActive: { borderColor: "#C8956C", backgroundColor: "#FDF8F3", color: "#C8956C" },
+  videoCountHint: { fontSize: 12, color: "#8A8580" },
   stepDetail: { padding: "12px 20px 16px", borderTop: "1px solid #E8E3DD", backgroundColor: "#fff" },
   stepWordRow: { display: "flex", alignItems: "center", gap: 8, padding: "6px 0", fontSize: 13 },
   pipelineBtn: { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "12px 24px", color: "#fff", borderRadius: 10, fontSize: 14, fontWeight: 600 },
+  previewGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 220px))", justifyContent: "start", gap: 12 },
+  previewCard: { width: 220, border: "1px solid #E8E3DD", borderRadius: 10, backgroundColor: "#FAFAF8", padding: 10 },
+  previewTitle: { fontSize: 13, fontWeight: 600, color: "#2D2A26", marginBottom: 8 },
+  previewViewport: { width: "100%", aspectRatio: "9 / 16", borderRadius: 8, overflow: "hidden", backgroundColor: "#000" },
+  previewVideo: { width: "100%", height: "100%", objectFit: "contain" as const, display: "block" },
   logBox: { maxHeight: 400, overflowY: "auto" as const, backgroundColor: "#FAFAF8", borderRadius: 8, padding: 16, border: "1px solid #E8E3DD", fontFamily: "'Noto Sans SC', monospace", fontSize: 13 },
   logLine: { display: "flex", gap: 8, padding: "4px 0", borderBottom: "1px solid #F0EDE8", alignItems: "baseline" },
   logTime: { color: "#B0AAA4", fontSize: 11, fontFamily: "monospace", minWidth: 70, flexShrink: 0 },

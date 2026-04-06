@@ -54,6 +54,7 @@ export const RemotionRoot: React.FC = () => {
         bgmSrc: "audio/bgm.mp3",
         fps: 30,
         previewMode: true,
+        scene4PrevWord: "groove",
       }}
       calculateMetadata={calculateVideoMetadata}
     />

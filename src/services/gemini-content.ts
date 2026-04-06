@@ -17,6 +17,10 @@ export interface ContentGenerationOverrides {
   prompt?: string;
 }
 
+export interface WordListGenerationOptions {
+  avoidWords?: string[];
+}
+
 /** 从 LLM 输出中提取有效 JSON */
 function extractJSON(text: string): string {
   // 1. 尝试去掉 markdown 代码块
@@ -77,6 +81,10 @@ function safeParseJSON(text: string): any {
   }
 }
 
+function normalizeWordKey(word?: string): string {
+  return (word || "").trim().toLowerCase();
+}
+
 /** 使用 Gemini Flash 生成单词内容 */
 export async function generateWordContent(
   word: string,
@@ -111,31 +119,50 @@ export async function generateWordContent(
 export async function generateWordList(
   theme: string,
   count: number,
+  options?: WordListGenerationOptions,
 ): Promise<Partial<WordEntry>[]> {
   const cfg = loadConfig();
+  const requestedCount = Math.max(1, Number(count) || 1);
 
-  // 如果请求数量多，分批生成以避免截断
-  if (count > 3) {
-    const results: Partial<WordEntry>[] = [];
-    for (let i = 0; i < count; i += 3) {
-      const batchSize = Math.min(3, count - i);
-      const batch = await generateWordListBatch(cfg, theme, batchSize, results.map(w => w.word || ""));
-      results.push(...batch);
+  // 最多提供 300 个已有词作为“禁止重复”上下文
+  const initialAvoid = (options?.avoidWords || [])
+    .map((w) => (w || "").trim())
+    .filter(Boolean)
+    .slice(0, 300);
+
+  const avoidSet = new Set(initialAvoid.map(normalizeWordKey));
+  const results: Partial<WordEntry>[] = [];
+  const maxRounds = 2;
+
+  for (let round = 0; round < maxRounds && results.length < requestedCount; round++) {
+    const missingCount = requestedCount - results.length;
+    const batch = await generateWordListBatch(
+      cfg,
+      theme,
+      missingCount,
+      Array.from(avoidSet).slice(0, 300),
+    );
+
+    for (const item of batch) {
+      const key = normalizeWordKey(item.word);
+      if (!key || avoidSet.has(key)) continue;
+      avoidSet.add(key);
+      results.push(item);
+      if (results.length >= requestedCount) break;
     }
-    return results;
   }
 
-  return generateWordListBatch(cfg, theme, count, []);
+  return results;
 }
 
 async function generateWordListBatch(
   cfg: ReturnType<typeof loadConfig>,
   theme: string,
   count: number,
-  existingWords: string[],
+  avoidWords: string[],
 ): Promise<Partial<WordEntry>[]> {
-  const excludeNote = existingWords.length > 0
-    ? `\n\n注意：不要重复以下已有的单词：${existingWords.join(", ")}`
+  const excludeNote = avoidWords.length > 0
+    ? `\n\n【禁止重复单词（最多300个）】\n${avoidWords.join(", ")}\n\n严格要求：不要输出与上述任何单词相同的条目。`
     : "";
 
   const prompt = `请为"${theme}"主题生成 ${count} 个英语单词/短语/句式的教学内容。${excludeNote}

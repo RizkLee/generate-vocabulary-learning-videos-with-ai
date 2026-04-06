@@ -30,7 +30,17 @@ export const Scene3Examples: React.FC<Scene3Props> = ({
     extrapolateRight: "clamp",
   });
 
-  const videoDurations = word.assets.exampleVideoDurations || [8, 8];
+  const explicitDurations = (word.assets.exampleVideoDurations || [])
+    .filter((d): d is number => Number.isFinite(d) && d > 0);
+  const legacyPathCount = word.assets.exampleVideoPaths?.length || 0;
+  const videoDurations = explicitDurations.length > 0
+    ? explicitDurations
+    : legacyPathCount > 0
+      ? Array.from({ length: legacyPathCount }, () => 8)
+      : [];
+
+  if (videoDurations.length === 0) return null;
+
   const videoStartFrames: number[] = [];
   let accum = sceneTransitionFrames;
   for (let i = 0; i < videoDurations.length; i++) {
